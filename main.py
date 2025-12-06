@@ -1,12 +1,11 @@
 """
 NIFTY Trading Bot - Main Orchestrator
-FIXED: Data flow order, ATM OI tracking, exit-before-entry prevention
+FIXED: Live Futures Price for Entry/Exit (not delayed candle close)
 """
 
 import asyncio
 from datetime import datetime
 
-# Import all modules
 from config import *
 from utils import *
 from data_manager import UpstoxClient, RedisBrain, DataFetcher
@@ -15,42 +14,36 @@ from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
-BOT_VERSION = "3.1.0-FIXED"
+BOT_VERSION = "3.2.0-LIVE-PRICE-FIX"
 
 logger = setup_logger("main")
 
 
-# ==================== Main Bot ====================
 class NiftyTradingBot:
-    """Main bot orchestrator with FIXED logic"""
+    """Main bot orchestrator with LIVE price fix"""
     
     def __init__(self):
-        # Core components
         self.memory = RedisBrain()
         self.upstox = None
         self.data_fetcher = None
         
-        # Analyzers
         self.oi_analyzer = OIAnalyzer()
         self.volume_analyzer = VolumeAnalyzer()
         self.technical_analyzer = TechnicalAnalyzer()
         self.market_analyzer = MarketAnalyzer()
         
-        # Signal & Position
         self.signal_gen = SignalGenerator()
         self.signal_validator = SignalValidator()
         self.position_tracker = PositionTracker()
         
-        # Alerts
         self.telegram = TelegramBot()
         self.formatter = MessageFormatter()
         
-        # State tracking - NEW
-        self.previous_strike_data = None  # ✅ Track previous scan for ATM OI changes
+        self.previous_strike_data = None
         self.exit_triggered_this_cycle = False
     
     async def initialize(self):
-        """Initialize bot with startup notification"""
+        """Initialize bot"""
         logger.info("=" * 60)
         logger.info(f"🚀 NIFTY Trading Bot v{BOT_VERSION}")
         logger.info("=" * 60)
@@ -60,7 +53,6 @@ class NiftyTradingBot:
         
         self.data_fetcher = DataFetcher(self.upstox)
         
-        # Send startup notification
         next_expiry = get_next_tuesday_expiry()
         futures_contract = get_futures_contract_name()
         current_time = format_time_ist(get_ist_time())
@@ -74,8 +66,8 @@ class NiftyTradingBot:
 • Strike Range: ATM ± 5 (11 strikes)
 
 🔧 <b>Configuration:</b>
-• First Data: 9:16 AM (skip 9:15 freak trades)
-• Warmup: {WARMUP_MINUTES} min from first snapshot
+• First Data: 9:16 AM
+• Warmup: {WARMUP_MINUTES} min
 • Signal Window: 9:21 AM - 3:15 PM
 • Scan Interval: {SCAN_INTERVAL}s
 • Memory TTL: {MEMORY_TTL_HOURS}h
@@ -85,13 +77,6 @@ class NiftyTradingBot:
 • Trailing SL: {'Enabled' if ENABLE_TRAILING_SL else 'Disabled'}
 • Signal Cooldown: {SIGNAL_COOLDOWN_SECONDS}s
 • Min Confidence: {MIN_CONFIDENCE}%
-• Min Hold Time: {MIN_HOLD_TIME_MINUTES}min
-
-🎯 <b>Thresholds (FIXED):</b>
-• OI 5m/15m: {MIN_OI_5M_FOR_ENTRY}% / {MIN_OI_15M_FOR_ENTRY}%
-• Exit OI Reversal: {EXIT_OI_REVERSAL_THRESHOLD}%
-• Volume Spike: {VOL_SPIKE_MULTIPLIER}x
-• VWAP Strict Mode: {'ON' if VWAP_STRICT_MODE else 'OFF'}
 
 ⏰ Bot started at {current_time}
 """
@@ -135,30 +120,26 @@ class NiftyTradingBot:
             await self.shutdown()
     
     async def _cycle(self):
-        """Single scan cycle - FIXED ORDER"""
+        """Single scan cycle - FIXED with LIVE price"""
         now = get_ist_time()
         status, _ = get_market_status()
         current_time = now.time()
         
-        # Reset cycle flag
         self.exit_triggered_this_cycle = False
         
         logger.info(f"\n{'='*60}")
         logger.info(f"⏰ {format_time_ist(now)} | {status}")
         logger.info(f"{'='*60}")
         
-        # Market closed
         if is_market_closed():
             logger.info("🌙 Market closed")
             return
         
-        # Premarket
         if is_premarket():
             logger.info("🌅 Premarket - waiting for 9:16 AM")
             await self.memory.load_previous_day_data()
             return
         
-        # Skip 9:15 (freak trades)
         if current_time >= time(9, 15) and current_time < time(9, 16):
             logger.info("⏭️ Skipping 9:15 AM (freak trade prevention)")
             return
@@ -174,12 +155,24 @@ class NiftyTradingBot:
             return
         logger.info(f"  ✅ Spot: ₹{spot:.2f}")
         
-        # Fetch futures
+        # ✅ FIX 1: Fetch futures CANDLES (for technical analysis only)
         futures_df = await self.data_fetcher.fetch_futures()
         if not validate_candle_data(futures_df):
-            logger.error("❌ STOP: Futures validation failed")
+            logger.error("❌ STOP: Futures candles validation failed")
             return
-        logger.info(f"  ✅ Futures: {len(futures_df)} candles")
+        logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars (for VWAP/EMA)")
+        
+        # ✅ FIX 2: Fetch LIVE Futures Price (for entry/exit decisions)
+        futures_ltp = await self.data_fetcher.fetch_futures_ltp()
+        if not validate_price(futures_ltp):
+            logger.error("❌ STOP: Live Futures price validation failed")
+            return
+        logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f} (REAL-TIME)")
+        
+        # Compare candle close vs live price
+        candle_close = futures_df['close'].iloc[-1]
+        price_diff = futures_ltp - candle_close
+        logger.info(f"  📊 Price Check: Candle Close={candle_close:.2f}, Live={futures_ltp:.2f}, Diff={price_diff:+.2f}")
         
         # Fetch option chain
         option_result = await self.data_fetcher.fetch_option_chain(spot)
@@ -189,14 +182,15 @@ class NiftyTradingBot:
         
         atm, strike_data = option_result
         if not validate_strike_data(strike_data):
-            logger.error(f"❌ STOP: Strike validation failed. Keys: {list(strike_data.keys()) if strike_data else 'None'}")
+            logger.error(f"❌ STOP: Strike validation failed")
             return
         logger.info(f"  ✅ Strikes: {len(strike_data)} strikes around ATM {atm}")
         
-        futures_price = futures_df['close'].iloc[-1]
-        logger.info(f"\n💹 Prices: Spot={spot:.2f}, Futures={futures_price:.2f}, ATM={atm}")
+        # ✅ Use LIVE price for all decisions
+        futures_price = futures_ltp
+        logger.info(f"\n💹 Prices: Spot={spot:.2f}, Futures(LIVE)={futures_price:.2f}, ATM={atm}")
         
-        # ========== STEP 2: SAVE OI SNAPSHOTS (BEFORE CALCULATIONS) ==========
+        # ========== STEP 2: SAVE OI SNAPSHOTS ==========
         
         logger.info("🔄 Saving OI snapshots...")
         total_ce, total_pe = self.oi_analyzer.calculate_total_oi(strike_data)
@@ -211,23 +205,19 @@ class NiftyTradingBot:
         
         logger.info("📊 Calculating OI changes...")
         
-        # Total OI changes
         ce_5m, pe_5m, has_5m = self.memory.get_total_oi_change(total_ce, total_pe, 5)
         ce_15m, pe_15m, has_15m = self.memory.get_total_oi_change(total_ce, total_pe, 15)
         
-        # ✅ ATM OI changes (FIXED - using previous_strike_data)
         atm_info = self.oi_analyzer.get_atm_oi_changes(
             strike_data, 
             atm, 
-            self.previous_strike_data  # Pass previous scan data
+            self.previous_strike_data
         )
         
-        # Also get from memory for redundancy
         atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
         atm_ce_5m, atm_pe_5m, has_atm_5m = self.memory.get_strike_oi_change(atm, atm_data, 5)
         atm_ce_15m, atm_pe_15m, has_atm_15m = self.memory.get_strike_oi_change(atm, atm_data, 15)
         
-        # Use memory values if atm_info doesn't have previous data
         if not atm_info['has_previous_data']:
             atm_info['ce_change_pct'] = atm_ce_15m
             atm_info['pe_change_pct'] = atm_pe_15m
@@ -236,7 +226,6 @@ class NiftyTradingBot:
         logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
         logger.info(f"  ATM {atm}: CE={atm_info['ce_change_pct']:+.1f}% PE={atm_info['pe_change_pct']:+.1f}%")
         
-        # ✅ Store current strike_data for next cycle
         self.previous_strike_data = strike_data.copy()
         
         # ========== STEP 4: RUN ANALYSIS ==========
@@ -259,7 +248,6 @@ class NiftyTradingBot:
         gamma = self.market_analyzer.detect_gamma_zone()
         unwinding = self.oi_analyzer.detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m)
         
-        # Determine OI strength
         if ce_15m < -STRONG_OI_15M_THRESHOLD or pe_15m < -STRONG_OI_15M_THRESHOLD:
             oi_strength = 'strong'
         elif ce_15m < -MIN_OI_15M_FOR_ENTRY or pe_15m < -MIN_OI_15M_FOR_ENTRY:
@@ -267,10 +255,9 @@ class NiftyTradingBot:
         else:
             oi_strength = 'weak'
         
-        # Log analysis
         logger.info(f"\n📊 ANALYSIS COMPLETE:")
         logger.info(f"  📈 PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
-        logger.info(f"  📍 Price vs VWAP: {vwap_dist:+.1f} pts")
+        logger.info(f"  📍 Price vs VWAP: {vwap_dist:+.1f} pts (LIVE price used)")
         logger.info(f"  🔄 OI Changes:")
         logger.info(f"     5m:  CE {ce_5m:+.1f}% | PE {pe_5m:+.1f}%")
         logger.info(f"     15m: CE {ce_15m:+.1f}% | PE {pe_15m:+.1f}% (Strength: {oi_strength})")
@@ -312,7 +299,7 @@ class NiftyTradingBot:
                 'pe_oi_5m': pe_5m,
                 'volume_ratio': vol_ratio,
                 'candle_data': candle,
-                'futures_price': futures_price,
+                'futures_price': futures_price,  # ✅ Using LIVE price
                 'atm_data': atm_data
             }
             
@@ -321,20 +308,16 @@ class NiftyTradingBot:
             if exit_check:
                 should_exit, reason, details = exit_check
                 
-                # Handle SL update notification (not exit)
                 if reason == "SL_UPDATED" and not should_exit:
                     if self.telegram.is_enabled():
                         msg = f"🔒 <b>TRAILING SL UPDATED</b>\n\n{details}"
                         await self.telegram.send_update(msg)
                     logger.info(f"📢 Trailing SL updated: {details}")
                 
-                # Handle actual exit
                 elif should_exit:
-                    # Estimate exit premium
                     exit_premium = self.position_tracker._estimate_premium(current_data, 
                         self.position_tracker.active_position.signal)
                     
-                    # Record exit in validator for re-entry protection
                     self.signal_validator.record_exit(
                         self.position_tracker.active_position.signal.signal_type,
                         self.position_tracker.active_position.signal.atm_strike
@@ -342,7 +325,6 @@ class NiftyTradingBot:
                     
                     self.position_tracker.close_position(reason, details, exit_premium)
                     
-                    # Send exit alert
                     if self.telegram.is_enabled():
                         msg = self.formatter.format_exit_signal(
                             self.position_tracker.closed_positions[-1],
@@ -351,15 +333,12 @@ class NiftyTradingBot:
                         await self.telegram.send_exit(msg)
                     
                     logger.info(f"🚪 EXIT TRIGGERED: {reason} - {details}")
-                    
-                    # ✅ Mark exit triggered - prevent entry this cycle
                     self.exit_triggered_this_cycle = True
             else:
                 logger.info(f"✅ Position holding - no exit conditions met")
         
         # ========== STEP 7: GENERATE ENTRY SIGNAL ==========
         
-        # ✅ Skip entry if exit happened this cycle
         if self.exit_triggered_this_cycle:
             logger.info(f"\n⏸️ EXIT TRIGGERED THIS CYCLE - Skipping entry check")
             return
@@ -372,7 +351,7 @@ class NiftyTradingBot:
             
             signal = self.signal_gen.generate(
                 spot_price=spot, 
-                futures_price=futures_price, 
+                futures_price=futures_price,  # ✅ Using LIVE price
                 vwap=vwap,
                 vwap_distance=vwap_dist, 
                 pcr=pcr, 
@@ -401,7 +380,6 @@ class NiftyTradingBot:
                 oi_strength=oi_strength
             )
             
-            # Apply higher threshold for early signals
             if not full_warmup and signal:
                 if signal.confidence < EARLY_SIGNAL_CONFIDENCE:
                     logger.info(f"  ⚡ Early signal {signal.confidence}% < {EARLY_SIGNAL_CONFIDENCE}% threshold")
@@ -412,17 +390,15 @@ class NiftyTradingBot:
             if validated:
                 logger.info(f"\n🔔 SIGNAL GENERATED!")
                 logger.info(f"  Type: {validated.signal_type.value}")
-                logger.info(f"  Entry: ₹{validated.entry_price:.2f}")
+                logger.info(f"  Entry: ₹{validated.entry_price:.2f} (LIVE PRICE)")
                 logger.info(f"  Confidence: {validated.confidence}%")
                 logger.info(f"  VWAP Score: {validated.vwap_score}/100")
                 logger.info(f"  OI Strength: {validated.oi_strength}")
                 if not full_warmup:
                     logger.info(f"  ⚡ EARLY SIGNAL (High Confidence)")
                 
-                # Open position
                 self.position_tracker.open_position(validated)
                 
-                # Send alert
                 if self.telegram.is_enabled():
                     msg = self.formatter.format_entry_signal(validated)
                     if not full_warmup:
@@ -436,7 +412,6 @@ class NiftyTradingBot:
             logger.info(f"\n📍 Position already active - not generating new signals")
 
 
-# ==================== Entry Point ====================
 async def main():
     bot = NiftyTradingBot()
     await bot.run()
