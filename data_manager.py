@@ -1,6 +1,6 @@
 """
 Data Manager: Upstox API + Redis Memory
-UPDATED: 9:16 first snapshot logic, 11 strikes range
+FIXED: Added live futures LTP fetching (not just candles)
 """
 
 import asyncio
@@ -256,7 +256,7 @@ class RedisBrain:
         self.memory_timestamps = {}
         self.snapshot_count = 0
         self.startup_time = datetime.now(IST)
-        self.first_snapshot_time = None  # Track when first data saved
+        self.first_snapshot_time = None
         self.premarket_loaded = False
         
         if REDIS_AVAILABLE and REDIS_URL:
@@ -271,12 +271,11 @@ class RedisBrain:
             logger.info(f"💾 RAM mode (TTL: {MEMORY_TTL_HOURS}h)")
     
     def save_total_oi(self, ce, pe):
-        """Save total OI snapshot with 24hr expiry and first snapshot tracking"""
+        """Save total OI snapshot with 24hr expiry"""
         now = datetime.now(IST).replace(second=0, microsecond=0)
         key = f"nifty:total:{now.strftime('%Y%m%d_%H%M')}"
         value = json.dumps({'ce': ce, 'pe': pe, 'timestamp': now.isoformat()})
         
-        # Track first snapshot
         if self.snapshot_count == 0:
             self.first_snapshot_time = now
             logger.info(f"📍 FIRST SNAPSHOT at {now.strftime('%H:%M')} - BASE REFERENCE")
@@ -293,14 +292,13 @@ class RedisBrain:
         
         self.snapshot_count += 1
         
-        # Log first save
         if self.snapshot_count == 1:
             logger.info(f"💾 First snapshot saved: CE={ce:,.0f}, PE={pe:,.0f}")
         
         self._cleanup()
     
     def get_total_oi_change(self, current_ce, current_pe, minutes_ago=15):
-        """Get OI change with better validation"""
+        """Get OI change with validation"""
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:total:{target.strftime('%Y%m%d_%H%M')}"
@@ -315,7 +313,6 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
-        # Try tolerance
         if not past_str:
             for offset in [-1, 1, -2, 2, -3, 3]:
                 alt = target + timedelta(minutes=offset)
@@ -342,7 +339,6 @@ class RedisBrain:
             past_ce = past.get('ce', 0)
             past_pe = past.get('pe', 0)
             
-            # Handle zero baseline
             if past_ce == 0 and current_ce == 0:
                 ce_chg = 0.0
             elif past_ce == 0:
@@ -383,7 +379,7 @@ class RedisBrain:
             self.memory_timestamps[key] = time_module.time()
     
     def get_strike_oi_change(self, strike, current_data, minutes_ago=15):
-        """Get strike OI change with validation"""
+        """Get strike OI change"""
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:strike:{strike}:{target.strftime('%Y%m%d_%H%M')}"
@@ -398,7 +394,6 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
-        # Tolerance
         if not past_str:
             for offset in [-1, 1, -2, 2, -3, 3]:
                 alt = target + timedelta(minutes=offset)
@@ -428,7 +423,6 @@ class RedisBrain:
             ce_curr = current_data.get('ce_oi', 0)
             pe_curr = current_data.get('pe_oi', 0)
             
-            # Handle zeros
             if ce_past == 0 and ce_curr == 0:
                 ce_chg = 0.0
             elif ce_past == 0:
@@ -450,7 +444,7 @@ class RedisBrain:
             return 0.0, 0.0, False
     
     def is_warmed_up(self, minutes=15):
-        """Check warmup from FIRST snapshot time"""
+        """Check if warmup complete"""
         if not self.first_snapshot_time:
             return False
         
@@ -459,7 +453,6 @@ class RedisBrain:
         if elapsed < minutes:
             return False
         
-        # Verify data exists
         test_time = datetime.now(IST) - timedelta(minutes=minutes)
         test_key = f"nifty:total:{test_time.strftime('%Y%m%d_%H%M')}"
         
@@ -475,7 +468,7 @@ class RedisBrain:
         return has_data
     
     def get_stats(self):
-        """Get stats with data check"""
+        """Get memory stats"""
         if not self.first_snapshot_time:
             elapsed = 0
         else:
@@ -491,7 +484,7 @@ class RedisBrain:
         }
     
     def _cleanup(self):
-        """Clean expired RAM (24hr)"""
+        """Clean expired RAM entries"""
         if not self.memory:
             return
         now = time_module.time()
@@ -505,7 +498,7 @@ class RedisBrain:
             logger.info(f"🧹 Cleaned {len(expired)} expired entries")
     
     async def load_previous_day_data(self):
-        """Load previous day data (skipped - not useful)"""
+        """Load previous day data"""
         if self.premarket_loaded:
             return
         logger.info("📚 Skipping previous day data (fresh start at 9:16)")
@@ -514,7 +507,7 @@ class RedisBrain:
 
 # ==================== Data Fetcher ====================
 class DataFetcher:
-    """High-level data fetching with fixes"""
+    """High-level data fetching with LIVE price support"""
     
     def __init__(self, client):
         self.client = client
@@ -543,7 +536,7 @@ class DataFetcher:
             return None
     
     async def fetch_futures(self):
-        """Fetch futures candles"""
+        """Fetch futures candles (for technical analysis)"""
         try:
             if not self.client.futures_key:
                 return None
@@ -566,6 +559,32 @@ class DataFetcher:
             logger.error(f"❌ Futures error: {e}")
             return None
     
+    # ✅ NEW FUNCTION: Live Futures Price
+    async def fetch_futures_ltp(self):
+        """Fetch Futures LIVE LTP (Market Quote) - for Entry/Exit decisions"""
+        try:
+            if not self.client.futures_key:
+                logger.error("❌ Futures key missing")
+                return None
+            
+            # Use market-quote endpoint (LIVE price, not candles)
+            data = await self.client.get_quote(self.client.futures_key)
+            
+            if not data:
+                logger.error("❌ Futures quote returned None")
+                return None
+            
+            ltp = data.get('last_price')
+            if not ltp:
+                logger.error(f"❌ No 'last_price' in futures quote. Keys: {list(data.keys())}")
+                return None
+            
+            return float(ltp)
+            
+        except Exception as e:
+            logger.error(f"❌ Futures LTP error: {e}")
+            return None
+    
     async def fetch_option_chain(self, spot_price):
         """Fetch option chain - 11 strikes (ATM ± 5)"""
         try:
@@ -574,7 +593,7 @@ class DataFetcher:
             
             expiry = get_next_tuesday_expiry()
             atm = calculate_atm_strike(spot_price)
-            min_strike, max_strike = get_strike_range(atm, num_strikes=5)  # ATM ± 5
+            min_strike, max_strike = get_strike_range(atm, num_strikes=5)
             
             data = await self.client.get_option_chain(self.client.index_key, expiry)
             
@@ -583,7 +602,6 @@ class DataFetcher:
             
             strike_data = {}
             
-            # Try multiple response formats
             if isinstance(data, list):
                 logger.info(f"📊 Parsing list format ({len(data)} items)")
                 
@@ -657,7 +675,6 @@ class DataFetcher:
                         'pe_ltp': float(pe_ltp)
                     }
             
-            # Validation
             if not strike_data:
                 logger.error("❌ No strikes parsed!")
                 return None
