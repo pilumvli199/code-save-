@@ -85,8 +85,22 @@ class NIFTYBot:
         if not await self.initialize():
             return
         
+        # Send startup notification if telegram enabled
         if self.telegram:
-            await self.telegram.send_startup_notification()
+            try:
+                startup_msg = (
+                    "🚀 *NIFTY Trading Bot Started*\n\n"
+                    f"📋 Configuration:\n"
+                    f"   • Storage: {STORAGE_STRIKE_RANGE * 2 + 1} strikes\n"
+                    f"   • Analysis: {ANALYSIS_STRIKE_RANGE * 2 + 1} strikes\n"
+                    f"   • OI Threshold: {MIN_OI_15M_FOR_ENTRY}%\n"
+                    f"   • Exit Threshold: {EXIT_OI_REVERSAL_THRESHOLD}%\n"
+                    f"   • Volume Spike: {VOL_SPIKE_MULTIPLIER}x\n\n"
+                    f"✅ Bot is now active!"
+                )
+                await self.telegram.send_update(startup_msg)
+            except Exception as e:
+                logger.warning(f"⚠️ Telegram notification failed: {e}")
         
         try:
             while True:
