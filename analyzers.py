@@ -1,6 +1,6 @@
 """
 Market Analyzers: OI, Volume, Technical, Market Structure
-ULTIMATE FIX: Active strikes filter, ATM candidate tracking, VWAP validation
+FIXED: AND logic for unwinding, VWAP validation, ATM OI changes
 """
 
 import pandas as pd
@@ -13,32 +13,7 @@ logger = setup_logger("analyzers")
 
 # ==================== OI Analyzer ====================
 class OIAnalyzer:
-    """Open Interest analysis with active strikes filtering"""
-    
-    @staticmethod
-    def get_active_strikes_for_analysis(strike_data, atm_strike):
-        """
-        ✅ NEW: Filter to ATM ± 2 strikes for HIGH PRECISION analysis
-        
-        Args:
-            strike_data: All 11 strikes from Redis
-            atm_strike: Current ATM
-        
-        Returns:
-            Filtered dict with only 5 strikes (ATM ± 2)
-        """
-        min_strike, max_strike = get_analysis_strike_range(atm_strike)
-        
-        active_strikes = {
-            strike: data 
-            for strike, data in strike_data.items()
-            if min_strike <= strike <= max_strike
-        }
-        
-        logger.info(f"   🎯 Analysis range: {min_strike} to {max_strike} ({len(active_strikes)} strikes)")
-        logger.debug(f"   📊 Active strikes: {sorted(active_strikes.keys())}")
-        
-        return active_strikes
+    """Open Interest analysis with FIXED logic"""
     
     @staticmethod
     def calculate_total_oi(strike_data):
@@ -56,21 +31,24 @@ class OIAnalyzer:
         """Calculate Put-Call Ratio with neutral default"""
         if total_ce == 0:
             if total_pe == 0:
-                return 1.0
+                return 1.0  # Neutral (both zero)
             else:
-                return 10.0
+                return 10.0  # Very high PCR (cap)
         
         pcr = total_pe / total_ce
-        return round(min(pcr, 10.0), 2)
+        return round(min(pcr, 10.0), 2)  # Cap at 10.0
     
     @staticmethod
     def detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m):
         """
-        Detect CE/PE unwinding - BOTH timeframes required (AND logic)
+        Detect CE/PE unwinding patterns - FIXED WITH AND LOGIC
+        
+        ✅ BOTH timeframes must show unwinding (not OR)
         """
-        # CE unwinding - BOTH timeframes
+        # CE unwinding - BOTH timeframes required
         ce_unwinding = (ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY)
         
+        # Strength based on 15m (primary timeframe)
         if ce_15m < -STRONG_OI_15M_THRESHOLD and ce_5m < -STRONG_OI_5M_THRESHOLD:
             ce_strength = 'strong'
         elif ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY:
@@ -78,9 +56,10 @@ class OIAnalyzer:
         else:
             ce_strength = 'weak'
         
-        # PE unwinding - BOTH timeframes
+        # PE unwinding - BOTH timeframes required
         pe_unwinding = (pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY)
         
+        # Strength
         if pe_15m < -STRONG_OI_15M_THRESHOLD and pe_5m < -STRONG_OI_5M_THRESHOLD:
             pe_strength = 'strong'
         elif pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY:
@@ -88,7 +67,7 @@ class OIAnalyzer:
         else:
             pe_strength = 'weak'
         
-        # Multi-timeframe confirmation
+        # Multi-timeframe confirmation (both showing negative)
         multi_tf = (ce_5m < -2.0 and ce_15m < -3.0) or (pe_5m < -2.0 and pe_15m < -3.0)
         
         return {
@@ -114,10 +93,17 @@ class OIAnalyzer:
     @staticmethod
     def get_atm_oi_changes(strike_data, atm_strike, previous_strike_data=None):
         """
-        Get ATM OI data WITH percentage changes
+        ✅ NEW FUNCTION: Get ATM strike data WITH OI change calculations
         
-        Uses previous_strike_data from last scan (stored in main.py)
+        Args:
+            strike_data: Current strike data dict
+            atm_strike: ATM strike price
+            previous_strike_data: Previous scan's strike data (optional)
+        
+        Returns:
+            Dict with current OI, volumes, premiums, and % changes
         """
+        # Get current ATM data
         current = strike_data.get(atm_strike, {
             'ce_oi': 0,
             'pe_oi': 0,
@@ -127,6 +113,7 @@ class OIAnalyzer:
             'pe_ltp': 0
         })
         
+        # Calculate changes if previous data available
         ce_change_pct = 0.0
         pe_change_pct = 0.0
         
@@ -136,6 +123,7 @@ class OIAnalyzer:
                 'pe_oi': 0
             })
             
+            # CE OI change
             prev_ce_oi = previous.get('ce_oi', 0)
             curr_ce_oi = current.get('ce_oi', 0)
             
@@ -143,8 +131,9 @@ class OIAnalyzer:
                 ce_diff = curr_ce_oi - prev_ce_oi
                 ce_change_pct = (ce_diff / prev_ce_oi) * 100
             elif curr_ce_oi > 0:
-                ce_change_pct = 100.0
+                ce_change_pct = 100.0  # New OI appeared
             
+            # PE OI change
             prev_pe_oi = previous.get('pe_oi', 0)
             curr_pe_oi = current.get('pe_oi', 0)
             
@@ -155,14 +144,19 @@ class OIAnalyzer:
                 pe_change_pct = 100.0
         
         return {
+            # Current values
             'ce_oi': current.get('ce_oi', 0),
             'pe_oi': current.get('pe_oi', 0),
             'ce_vol': current.get('ce_vol', 0),
             'pe_vol': current.get('pe_vol', 0),
             'ce_ltp': current.get('ce_ltp', 0),
             'pe_ltp': current.get('pe_ltp', 0),
+            
+            # Changes
             'ce_change_pct': round(ce_change_pct, 1),
             'pe_change_pct': round(pe_change_pct, 1),
+            
+            # Meta
             'has_previous_data': previous_strike_data is not None,
             'atm_strike': atm_strike
         }
@@ -170,14 +164,24 @@ class OIAnalyzer:
     @staticmethod
     def check_oi_reversal(signal_type, oi_changes_history, threshold=EXIT_OI_REVERSAL_THRESHOLD):
         """
-        Check OI reversal with sustained building over 2+ candles
+        ✅ NEW FUNCTION: Check OI reversal with sustained building
+        
+        Args:
+            signal_type: 'CE' or 'PE'
+            oi_changes_history: List of last 3-5 OI changes
+            threshold: Minimum OI change to consider (default 3.0)
+        
+        Returns:
+            (is_reversal, strength, avg_building, message)
         """
         if not oi_changes_history or len(oi_changes_history) < EXIT_OI_CONFIRMATION_CANDLES:
             return False, 'none', 0.0, "Insufficient data"
         
+        # Get last N candles (confirmation window)
         recent = oi_changes_history[-EXIT_OI_CONFIRMATION_CANDLES:]
         current = recent[-1]
         
+        # Count how many candles show building (> threshold)
         building_count = sum(1 for oi in recent if oi > threshold)
         
         # Strong reversal: ALL recent candles building
@@ -186,10 +190,11 @@ class OIAnalyzer:
             strength = 'strong' if avg_building > 5.0 else 'medium'
             return True, strength, avg_building, f"{signal_type} sustained building: {building_count}/{len(recent)} candles"
         
-        # Very strong single spike
+        # Very strong single spike (exception case)
         if current > EXIT_OI_SPIKE_THRESHOLD:
             return True, 'spike', current, f"{signal_type} spike: {current:.1f}%"
         
+        # Not a confirmed reversal
         return False, 'none', current, f"{signal_type} OI change: {current:.1f}% (not confirmed)"
 
 
@@ -217,7 +222,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def calculate_order_flow(strike_data):
-        """Calculate order flow ratio"""
+        """Calculate order flow ratio (CE vol / PE vol)"""
         ce_vol, pe_vol = VolumeAnalyzer.calculate_total_volume(strike_data)
         
         if ce_vol == 0 and pe_vol == 0:
@@ -288,40 +293,54 @@ class TechnicalAnalyzer:
     @staticmethod
     def validate_signal_with_vwap(signal_type, spot, vwap, atr):
         """
-        Validate signal based on VWAP distance - BLOCKING CHECK
+        ✅ NEW FUNCTION: Validate if signal should be taken based on VWAP distance
+        
+        Args:
+            signal_type: "CE_BUY" or "PE_BUY"
+            spot: Current spot/futures price
+            vwap: VWAP value
+            atr: Current ATR
+        
+        Returns:
+            (is_valid, reason, confidence_score)
         """
         if not vwap or not spot or not atr:
             return False, "Missing VWAP/Price data", 0
         
         distance = spot - vwap
         
+        # Calculate buffer (use config or ATR-based)
         if VWAP_STRICT_MODE:
             buffer = atr * VWAP_DISTANCE_MAX_ATR_MULTIPLE
         else:
-            buffer = VWAP_BUFFER
+            buffer = VWAP_BUFFER  # Fixed buffer from config
         
         if signal_type == "CE_BUY":
+            # CE buy: Price should be near or above VWAP
             if distance < -buffer:
                 return False, f"Price {abs(distance):.0f} pts below VWAP (too far)", 0
             elif distance > buffer * 3:
                 return False, f"Price {distance:.0f} pts above VWAP (overextended)", 0
             else:
+                # Score based on proximity (closer = better for CE)
                 if distance > 0:
-                    score = min(100, 80 + (distance / buffer * 20))
+                    score = min(100, 80 + (distance / buffer * 20))  # Above VWAP = good
                 else:
-                    score = max(60, 80 - (abs(distance) / buffer * 20))
+                    score = max(60, 80 - (abs(distance) / buffer * 20))  # Below but close = ok
                 return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
         
         elif signal_type == "PE_BUY":
+            # PE buy: Price should be near or below VWAP
             if distance > buffer:
                 return False, f"Price {distance:.0f} pts above VWAP (too far)", 0
             elif distance < -buffer * 3:
                 return False, f"Price {abs(distance):.0f} pts below VWAP (overextended)", 0
             else:
+                # Score based on proximity (closer = better for PE)
                 if distance < 0:
-                    score = min(100, 80 + (abs(distance) / buffer * 20))
+                    score = min(100, 80 + (abs(distance) / buffer * 20))  # Below VWAP = good
                 else:
-                    score = max(60, 80 - (distance / buffer * 20))
+                    score = max(60, 80 - (distance / buffer * 20))  # Above but close = ok
                 return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
         
         return False, "Unknown signal type", 0
