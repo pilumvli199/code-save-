@@ -1,6 +1,6 @@
 """
 Data Manager: Upstox API + Redis Memory
-FIXED: Added live futures LTP fetching (not just candles)
+FIXED: Cache buster + better ATM data handling
 """
 
 import asyncio
@@ -29,7 +29,7 @@ MEMORY_TTL_SECONDS = MEMORY_TTL_HOURS * 3600
 
 # ==================== Upstox Client ====================
 class UpstoxClient:
-    """Upstox API V2 Client with dynamic instrument detection"""
+    """Upstox API V2 Client with cache busting"""
     
     def __init__(self):
         self.session = None
@@ -62,9 +62,22 @@ class UpstoxClient:
             await asyncio.sleep(self._rate_limit_delay - elapsed)
         self._last_request = asyncio.get_event_loop().time()
     
-    async def _request(self, url, params=None):
-        """Make API request with retry"""
+    async def _request(self, url, params=None, force_fresh=False):
+        """
+        Make API request with retry and optional cache busting
+        
+        Args:
+            url: API endpoint URL
+            params: Query parameters
+            force_fresh: If True, adds cache buster to force fresh data
+        """
         await self._rate_limit()
+        
+        # ✅ CACHE BUSTER: Add timestamp to params (cleaner than URL modification)
+        if force_fresh:
+            if params is None:
+                params = {}
+            params['_cache_bust'] = int(time_module.time() * 1000)
         
         for attempt in range(3):
             try:
@@ -177,14 +190,15 @@ class UpstoxClient:
             return False
     
     async def get_quote(self, instrument_key):
-        """Get market quote"""
+        """Get market quote (minimal cache)"""
         if not instrument_key:
             return None
         
         encoded = quote(instrument_key, safe='')
         url = f"{UPSTOX_QUOTE_URL}?symbol={encoded}"
         
-        data = await self._request(url)
+        # ✅ Force fresh for quotes (they should be real-time)
+        data = await self._request(url, force_fresh=True)
         
         if not data or 'data' not in data:
             return None
@@ -225,15 +239,17 @@ class UpstoxClient:
         return data['data']
     
     async def get_option_chain(self, instrument_key, expiry_date):
-        """Get option chain"""
+        """Get option chain with cache busting"""
         if not instrument_key:
             return None
         
         encoded = quote(instrument_key, safe='')
         url = f"{UPSTOX_OPTION_CHAIN_URL}?instrument_key={encoded}&expiry_date={expiry_date}"
         
-        logger.info(f"📡 Fetching option chain...")
-        data = await self._request(url)
+        logger.info(f"📡 Fetching option chain (cache-busted)...")
+        
+        # ✅ Force fresh data with cache buster
+        data = await self._request(url, force_fresh=True)
         
         if not data:
             logger.error("❌ Option chain API returned None")
@@ -246,9 +262,9 @@ class UpstoxClient:
         return data['data']
 
 
-# ==================== Redis Brain (24hr expiry) ====================
+# ==================== Redis Brain ====================
 class RedisBrain:
-    """Memory manager with 24 hour TTL and 9:16 base tracking"""
+    """Memory manager with 24 hour TTL"""
     
     def __init__(self):
         self.client = None
@@ -271,7 +287,7 @@ class RedisBrain:
             logger.info(f"💾 RAM mode (TTL: {MEMORY_TTL_HOURS}h)")
     
     def save_total_oi(self, ce, pe):
-        """Save total OI snapshot with 24hr expiry"""
+        """Save total OI snapshot"""
         now = datetime.now(IST).replace(second=0, microsecond=0)
         key = f"nifty:total:{now.strftime('%Y%m%d_%H%M')}"
         value = json.dumps({'ce': ce, 'pe': pe, 'timestamp': now.isoformat()})
@@ -313,8 +329,9 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
+        # Try tolerance (wider range for option chain cache)
         if not past_str:
-            for offset in [-1, 1, -2, 2, -3, 3]:
+            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:  # ✅ Extended tolerance
                 alt = target + timedelta(minutes=offset)
                 alt_key = f"nifty:total:{alt.strftime('%Y%m%d_%H%M')}"
                 
@@ -322,6 +339,7 @@ class RedisBrain:
                     try:
                         past_str = self.client.get(alt_key)
                         if past_str:
+                            logger.debug(f"  📍 Using {offset}min offset for OI comparison")
                             break
                     except:
                         pass
@@ -329,6 +347,7 @@ class RedisBrain:
                 if not past_str:
                     past_str = self.memory.get(alt_key)
                     if past_str:
+                        logger.debug(f"  📍 Using {offset}min offset for OI comparison")
                         break
         
         if not past_str:
@@ -360,7 +379,7 @@ class RedisBrain:
             return 0.0, 0.0, False
     
     def save_strike(self, strike, data):
-        """Save strike OI with 24hr expiry"""
+        """Save strike OI"""
         now = datetime.now(IST).replace(second=0, microsecond=0)
         key = f"nifty:strike:{strike}:{now.strftime('%Y%m%d_%H%M')}"
         
@@ -379,7 +398,7 @@ class RedisBrain:
             self.memory_timestamps[key] = time_module.time()
     
     def get_strike_oi_change(self, strike, current_data, minutes_ago=15):
-        """Get strike OI change"""
+        """Get strike OI change with extended tolerance"""
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:strike:{strike}:{target.strftime('%Y%m%d_%H%M')}"
@@ -394,8 +413,9 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
+        # Extended tolerance for strike data
         if not past_str:
-            for offset in [-1, 1, -2, 2, -3, 3]:
+            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
                 alt = target + timedelta(minutes=offset)
                 alt_key = f"nifty:strike:{strike}:{alt.strftime('%Y%m%d_%H%M')}"
                 
@@ -444,7 +464,7 @@ class RedisBrain:
             return 0.0, 0.0, False
     
     def is_warmed_up(self, minutes=15):
-        """Check if warmup complete"""
+        """Check warmup status"""
         if not self.first_snapshot_time:
             return False
         
@@ -507,7 +527,7 @@ class RedisBrain:
 
 # ==================== Data Fetcher ====================
 class DataFetcher:
-    """High-level data fetching with LIVE price support"""
+    """High-level data fetching"""
     
     def __init__(self, client):
         self.client = client
@@ -536,7 +556,7 @@ class DataFetcher:
             return None
     
     async def fetch_futures(self):
-        """Fetch futures candles (for technical analysis)"""
+        """Fetch futures candles"""
         try:
             if not self.client.futures_key:
                 return None
@@ -559,15 +579,13 @@ class DataFetcher:
             logger.error(f"❌ Futures error: {e}")
             return None
     
-    # ✅ NEW FUNCTION: Live Futures Price
     async def fetch_futures_ltp(self):
-        """Fetch Futures LIVE LTP (Market Quote) - for Entry/Exit decisions"""
+        """Fetch Futures LIVE LTP"""
         try:
             if not self.client.futures_key:
                 logger.error("❌ Futures key missing")
                 return None
             
-            # Use market-quote endpoint (LIVE price, not candles)
             data = await self.client.get_quote(self.client.futures_key)
             
             if not data:
