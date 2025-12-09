@@ -1,6 +1,6 @@
 """
 Data Manager: Upstox API + Redis Memory
-FIXED: Cache buster + better ATM data handling
+FIXED: Monthly futures auto-detection, LIVE price fetching, 11 strikes fetch
 """
 
 import asyncio
@@ -22,14 +22,12 @@ from utils import IST, setup_logger
 
 logger = setup_logger("data_manager")
 
-# Memory TTL (24 Hours)
-MEMORY_TTL_HOURS = 24
 MEMORY_TTL_SECONDS = MEMORY_TTL_HOURS * 3600
 
 
 # ==================== Upstox Client ====================
 class UpstoxClient:
-    """Upstox API V2 Client with cache busting"""
+    """Upstox API V2 Client with MONTHLY futures detection"""
     
     def __init__(self):
         self.session = None
@@ -40,6 +38,8 @@ class UpstoxClient:
         self.spot_key = None
         self.index_key = None
         self.futures_key = None
+        self.futures_expiry = None
+        self.futures_symbol = None
     
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -62,22 +62,9 @@ class UpstoxClient:
             await asyncio.sleep(self._rate_limit_delay - elapsed)
         self._last_request = asyncio.get_event_loop().time()
     
-    async def _request(self, url, params=None, force_fresh=False):
-        """
-        Make API request with retry and optional cache busting
-        
-        Args:
-            url: API endpoint URL
-            params: Query parameters
-            force_fresh: If True, adds cache buster to force fresh data
-        """
+    async def _request(self, url, params=None):
+        """Make API request with retry"""
         await self._rate_limit()
-        
-        # ✅ CACHE BUSTER: Add timestamp to params (cleaner than URL modification)
-        if force_fresh:
-            if params is None:
-                params = {}
-            params['_cache_bust'] = int(time_module.time() * 1000)
         
         for attempt in range(3):
             try:
@@ -112,11 +99,11 @@ class UpstoxClient:
         return None
     
     async def detect_instruments(self):
-        """Auto-detect NIFTY instrument keys"""
+        """Auto-detect NIFTY instruments (spot + MONTHLY futures)"""
         logger.info("🔍 Auto-detecting NIFTY instruments...")
         
         try:
-            url = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz'
+            url = UPSTOX_INSTRUMENTS_URL
             
             async with self.session.get(url) as resp:
                 if resp.status != 200:
@@ -146,7 +133,7 @@ class UpstoxClient:
                 logger.error("❌ NIFTY spot not found")
                 return False
             
-            # Find nearest futures
+            # Find MONTHLY futures (not weekly!)
             now = datetime.now(IST)
             futures_list = []
             
@@ -164,11 +151,14 @@ class UpstoxClient:
                 
                 try:
                     expiry_dt = datetime.fromtimestamp(expiry_ms / 1000, tz=IST)
+                    
+                    # Only consider futures that expire after today
                     if expiry_dt > now:
                         futures_list.append({
                             'key': instrument.get('instrument_key'),
                             'expiry': expiry_dt,
-                            'symbol': instrument.get('trading_symbol', '')
+                            'symbol': instrument.get('trading_symbol', ''),
+                            'days_to_expiry': (expiry_dt - now).days
                         })
                 except:
                     continue
@@ -177,11 +167,24 @@ class UpstoxClient:
                 logger.error("❌ No futures found")
                 return False
             
+            # Sort by expiry date
             futures_list.sort(key=lambda x: x['expiry'])
+            
+            # Get nearest futures (which should be monthly)
             nearest = futures_list[0]
             
             self.futures_key = nearest['key']
-            logger.info(f"✅ Futures: {nearest['symbol']} (Expiry: {nearest['expiry'].strftime('%Y-%m-%d')})")
+            self.futures_expiry = nearest['expiry']
+            self.futures_symbol = nearest['symbol']
+            
+            logger.info(f"✅ Futures: {nearest['symbol']}")
+            logger.info(f"   Expiry: {nearest['expiry'].strftime('%Y-%m-%d %A')} ({nearest['days_to_expiry']} days)")
+            
+            # Verify it's monthly (should be last Thursday of month)
+            if nearest['expiry'].weekday() == 3:  # Thursday
+                logger.info(f"   ✅ Confirmed: MONTHLY futures (last Thursday)")
+            else:
+                logger.warning(f"   ⚠️ Warning: Not a Thursday expiry, might be weekly")
             
             return True
         
@@ -190,15 +193,14 @@ class UpstoxClient:
             return False
     
     async def get_quote(self, instrument_key):
-        """Get market quote (minimal cache)"""
+        """Get market quote (for spot/futures LIVE price)"""
         if not instrument_key:
             return None
         
         encoded = quote(instrument_key, safe='')
         url = f"{UPSTOX_QUOTE_URL}?symbol={encoded}"
         
-        # ✅ Force fresh for quotes (they should be real-time)
-        data = await self._request(url, force_fresh=True)
+        data = await self._request(url)
         
         if not data or 'data' not in data:
             return None
@@ -224,7 +226,7 @@ class UpstoxClient:
         return None
     
     async def get_candles(self, instrument_key, interval='1minute'):
-        """Get historical candles"""
+        """Get historical candles (for technical analysis only)"""
         if not instrument_key:
             return None
         
@@ -239,17 +241,14 @@ class UpstoxClient:
         return data['data']
     
     async def get_option_chain(self, instrument_key, expiry_date):
-        """Get option chain with cache busting"""
+        """Get option chain (WEEKLY options)"""
         if not instrument_key:
             return None
         
         encoded = quote(instrument_key, safe='')
         url = f"{UPSTOX_OPTION_CHAIN_URL}?instrument_key={encoded}&expiry_date={expiry_date}"
         
-        logger.info(f"📡 Fetching option chain (cache-busted)...")
-        
-        # ✅ Force fresh data with cache buster
-        data = await self._request(url, force_fresh=True)
+        data = await self._request(url)
         
         if not data:
             logger.error("❌ Option chain API returned None")
@@ -271,7 +270,6 @@ class RedisBrain:
         self.memory = {}
         self.memory_timestamps = {}
         self.snapshot_count = 0
-        self.startup_time = datetime.now(IST)
         self.first_snapshot_time = None
         self.premarket_loaded = False
         
@@ -314,7 +312,7 @@ class RedisBrain:
         self._cleanup()
     
     def get_total_oi_change(self, current_ce, current_pe, minutes_ago=15):
-        """Get OI change with validation"""
+        """Get OI change with tolerance"""
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:total:{target.strftime('%Y%m%d_%H%M')}"
@@ -329,9 +327,9 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
-        # Try tolerance (wider range for option chain cache)
+        # Try tolerance
         if not past_str:
-            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:  # ✅ Extended tolerance
+            for offset in [-1, 1, -2, 2]:
                 alt = target + timedelta(minutes=offset)
                 alt_key = f"nifty:total:{alt.strftime('%Y%m%d_%H%M')}"
                 
@@ -339,7 +337,6 @@ class RedisBrain:
                     try:
                         past_str = self.client.get(alt_key)
                         if past_str:
-                            logger.debug(f"  📍 Using {offset}min offset for OI comparison")
                             break
                     except:
                         pass
@@ -347,7 +344,6 @@ class RedisBrain:
                 if not past_str:
                     past_str = self.memory.get(alt_key)
                     if past_str:
-                        logger.debug(f"  📍 Using {offset}min offset for OI comparison")
                         break
         
         if not past_str:
@@ -358,17 +354,13 @@ class RedisBrain:
             past_ce = past.get('ce', 0)
             past_pe = past.get('pe', 0)
             
-            if past_ce == 0 and current_ce == 0:
-                ce_chg = 0.0
-            elif past_ce == 0:
-                ce_chg = 100.0
+            if past_ce == 0:
+                ce_chg = 100.0 if current_ce > 0 else 0.0
             else:
                 ce_chg = ((current_ce - past_ce) / past_ce * 100)
             
-            if past_pe == 0 and current_pe == 0:
-                pe_chg = 0.0
-            elif past_pe == 0:
-                pe_chg = 100.0
+            if past_pe == 0:
+                pe_chg = 100.0 if current_pe > 0 else 0.0
             else:
                 pe_chg = ((current_pe - past_pe) / past_pe * 100)
             
@@ -398,7 +390,7 @@ class RedisBrain:
             self.memory_timestamps[key] = time_module.time()
     
     def get_strike_oi_change(self, strike, current_data, minutes_ago=15):
-        """Get strike OI change with extended tolerance"""
+        """Get strike OI change"""
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:strike:{strike}:{target.strftime('%Y%m%d_%H%M')}"
@@ -413,9 +405,8 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
-        # Extended tolerance for strike data
         if not past_str:
-            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
+            for offset in [-1, 1, -2, 2]:
                 alt = target + timedelta(minutes=offset)
                 alt_key = f"nifty:strike:{strike}:{alt.strftime('%Y%m%d_%H%M')}"
                 
@@ -443,17 +434,13 @@ class RedisBrain:
             ce_curr = current_data.get('ce_oi', 0)
             pe_curr = current_data.get('pe_oi', 0)
             
-            if ce_past == 0 and ce_curr == 0:
-                ce_chg = 0.0
-            elif ce_past == 0:
-                ce_chg = 100.0
+            if ce_past == 0:
+                ce_chg = 100.0 if ce_curr > 0 else 0.0
             else:
                 ce_chg = ((ce_curr - ce_past) / ce_past * 100)
             
-            if pe_past == 0 and pe_curr == 0:
-                pe_chg = 0.0
-            elif pe_past == 0:
-                pe_chg = 100.0
+            if pe_past == 0:
+                pe_chg = 100.0 if pe_curr > 0 else 0.0
             else:
                 pe_chg = ((pe_curr - pe_past) / pe_past * 100)
             
@@ -464,7 +451,7 @@ class RedisBrain:
             return 0.0, 0.0, False
     
     def is_warmed_up(self, minutes=15):
-        """Check warmup status"""
+        """Check warmup from first snapshot"""
         if not self.first_snapshot_time:
             return False
         
@@ -518,7 +505,7 @@ class RedisBrain:
             logger.info(f"🧹 Cleaned {len(expired)} expired entries")
     
     async def load_previous_day_data(self):
-        """Load previous day data"""
+        """Skip previous day data"""
         if self.premarket_loaded:
             return
         logger.info("📚 Skipping previous day data (fresh start at 9:16)")
@@ -533,7 +520,7 @@ class DataFetcher:
         self.client = client
     
     async def fetch_spot(self):
-        """Fetch spot price"""
+        """Fetch spot price (for ATM calculation)"""
         try:
             if not self.client.spot_key:
                 logger.error("❌ Spot key missing")
@@ -555,8 +542,8 @@ class DataFetcher:
             logger.error(f"❌ Spot error: {e}")
             return None
     
-    async def fetch_futures(self):
-        """Fetch futures candles"""
+    async def fetch_futures_candles(self):
+        """Fetch MONTHLY futures candles (for VWAP/ATR/technical analysis)"""
         try:
             if not self.client.futures_key:
                 return None
@@ -576,11 +563,11 @@ class DataFetcher:
             return df
         
         except Exception as e:
-            logger.error(f"❌ Futures error: {e}")
+            logger.error(f"❌ Futures candles error: {e}")
             return None
     
     async def fetch_futures_ltp(self):
-        """Fetch Futures LIVE LTP"""
+        """Fetch MONTHLY futures LIVE price (for entry/exit decisions)"""
         try:
             if not self.client.futures_key:
                 logger.error("❌ Futures key missing")
@@ -604,14 +591,16 @@ class DataFetcher:
             return None
     
     async def fetch_option_chain(self, spot_price):
-        """Fetch option chain - 11 strikes (ATM ± 5)"""
+        """Fetch WEEKLY option chain - 11 strikes (ATM ± 5)"""
         try:
             if not self.client.index_key:
                 return None
             
-            expiry = get_next_tuesday_expiry()
+            expiry = get_next_weekly_expiry()
             atm = calculate_atm_strike(spot_price)
-            min_strike, max_strike = get_strike_range(atm, num_strikes=5)
+            min_strike, max_strike = get_strike_range_fetch(atm)
+            
+            logger.info(f"📡 Fetching option chain: Expiry={expiry}, ATM={atm}, Range={min_strike}-{max_strike}")
             
             data = await self.client.get_option_chain(self.client.index_key, expiry)
             
@@ -620,9 +609,8 @@ class DataFetcher:
             
             strike_data = {}
             
+            # Parse response (handle both list and dict formats)
             if isinstance(data, list):
-                logger.info(f"📊 Parsing list format ({len(data)} items)")
-                
                 for item in data:
                     strike = item.get('strike_price') or item.get('strike')
                     if not strike:
@@ -635,36 +623,16 @@ class DataFetcher:
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
                     
-                    ce_oi = (ce_data.get('open_interest') or ce_data.get('oi') or 
-                            ce_data.get('market_data', {}).get('oi') or 0)
-                    
-                    pe_oi = (pe_data.get('open_interest') or pe_data.get('oi') or 
-                            pe_data.get('market_data', {}).get('oi') or 0)
-                    
-                    ce_vol = (ce_data.get('volume') or 
-                             ce_data.get('market_data', {}).get('volume') or 0)
-                    
-                    pe_vol = (pe_data.get('volume') or 
-                             pe_data.get('market_data', {}).get('volume') or 0)
-                    
-                    ce_ltp = (ce_data.get('last_price') or ce_data.get('ltp') or 
-                             ce_data.get('market_data', {}).get('ltp') or 0)
-                    
-                    pe_ltp = (pe_data.get('last_price') or pe_data.get('ltp') or 
-                             pe_data.get('market_data', {}).get('ltp') or 0)
-                    
                     strike_data[strike] = {
-                        'ce_oi': float(ce_oi),
-                        'pe_oi': float(pe_oi),
-                        'ce_vol': float(ce_vol),
-                        'pe_vol': float(pe_vol),
-                        'ce_ltp': float(ce_ltp),
-                        'pe_ltp': float(pe_ltp)
+                        'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
+                        'pe_oi': float(pe_data.get('open_interest') or pe_data.get('oi') or 0),
+                        'ce_vol': float(ce_data.get('volume') or 0),
+                        'pe_vol': float(pe_data.get('volume') or 0),
+                        'ce_ltp': float(ce_data.get('last_price') or ce_data.get('ltp') or 0),
+                        'pe_ltp': float(pe_data.get('last_price') or pe_data.get('ltp') or 0)
                     }
             
             elif isinstance(data, dict):
-                logger.info(f"📊 Parsing dict format ({len(data)} keys)")
-                
                 for key, item in data.items():
                     strike = item.get('strike_price') or item.get('strike')
                     if not strike:
@@ -677,20 +645,13 @@ class DataFetcher:
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
                     
-                    ce_oi = (ce_data.get('open_interest') or ce_data.get('oi') or 0)
-                    pe_oi = (pe_data.get('open_interest') or pe_data.get('oi') or 0)
-                    ce_vol = (ce_data.get('volume') or 0)
-                    pe_vol = (pe_data.get('volume') or 0)
-                    ce_ltp = (ce_data.get('last_price') or ce_data.get('ltp') or 0)
-                    pe_ltp = (pe_data.get('last_price') or pe_data.get('ltp') or 0)
-                    
                     strike_data[strike] = {
-                        'ce_oi': float(ce_oi),
-                        'pe_oi': float(pe_oi),
-                        'ce_vol': float(ce_vol),
-                        'pe_vol': float(pe_vol),
-                        'ce_ltp': float(ce_ltp),
-                        'pe_ltp': float(pe_ltp)
+                        'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
+                        'pe_oi': float(pe_data.get('open_interest') or pe_data.get('oi') or 0),
+                        'ce_vol': float(ce_data.get('volume') or 0),
+                        'pe_vol': float(pe_data.get('volume') or 0),
+                        'ce_ltp': float(ce_data.get('last_price') or ce_data.get('ltp') or 0),
+                        'pe_ltp': float(pe_data.get('last_price') or pe_data.get('ltp') or 0)
                     }
             
             if not strike_data:
@@ -703,10 +664,6 @@ class DataFetcher:
                 return None
             
             logger.info(f"✅ Parsed {len(strike_data)} strikes (Total OI: {total_oi:,.0f})")
-            
-            sample_strike = list(strike_data.keys())[0]
-            sample_data = strike_data[sample_strike]
-            logger.info(f"📊 Sample {sample_strike}: CE_OI={sample_data['ce_oi']:,.0f}, PE_OI={sample_data['pe_oi']:,.0f}")
             
             return atm, strike_data
         
