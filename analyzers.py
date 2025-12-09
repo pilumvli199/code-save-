@@ -1,6 +1,6 @@
 """
 Market Analyzers: OI, Volume, Technical, Market Structure
-FIXED: AND logic for unwinding, VWAP validation, ATM OI changes
+FIXED: 5 strikes deep analysis, AND logic for unwinding, VWAP validation
 """
 
 import pandas as pd
@@ -13,11 +13,11 @@ logger = setup_logger("analyzers")
 
 # ==================== OI Analyzer ====================
 class OIAnalyzer:
-    """Open Interest analysis with FIXED logic"""
+    """Open Interest analysis with 5 strikes deep focus"""
     
     @staticmethod
     def calculate_total_oi(strike_data):
-        """Calculate total CE/PE OI"""
+        """Calculate total CE/PE OI (uses ALL 11 strikes)"""
         if not strike_data:
             return 0, 0
         
@@ -25,6 +25,24 @@ class OIAnalyzer:
         total_pe = sum(d.get('pe_oi', 0) for d in strike_data.values())
         
         return total_ce, total_pe
+    
+    @staticmethod
+    def calculate_deep_analysis_oi(strike_data, atm_strike):
+        """
+        Calculate CE/PE OI for DEEP ANALYSIS strikes only (5 strikes)
+        ATM ± 2 = 5 strikes where 90% institutional money flows
+        """
+        deep_strikes = get_deep_analysis_strikes(atm_strike)
+        
+        deep_ce = 0
+        deep_pe = 0
+        
+        for strike in deep_strikes:
+            if strike in strike_data:
+                deep_ce += strike_data[strike].get('ce_oi', 0)
+                deep_pe += strike_data[strike].get('pe_oi', 0)
+        
+        return deep_ce, deep_pe, deep_strikes
     
     @staticmethod
     def calculate_pcr(total_pe, total_ce):
@@ -41,11 +59,10 @@ class OIAnalyzer:
     @staticmethod
     def detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m):
         """
-        Detect CE/PE unwinding patterns - FIXED WITH AND LOGIC
-        
-        ✅ BOTH timeframes must show unwinding (not OR)
+        Detect CE/PE unwinding - AND LOGIC (both timeframes required)
+        This ensures quality signals, not just noise
         """
-        # CE unwinding - BOTH timeframes required
+        # CE unwinding - BOTH 5m AND 15m must show unwinding
         ce_unwinding = (ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY)
         
         # Strength based on 15m (primary timeframe)
@@ -56,7 +73,7 @@ class OIAnalyzer:
         else:
             ce_strength = 'weak'
         
-        # PE unwinding - BOTH timeframes required
+        # PE unwinding - BOTH 5m AND 15m must show unwinding
         pe_unwinding = (pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY)
         
         # Strength
@@ -93,17 +110,9 @@ class OIAnalyzer:
     @staticmethod
     def get_atm_oi_changes(strike_data, atm_strike, previous_strike_data=None):
         """
-        ✅ NEW FUNCTION: Get ATM strike data WITH OI change calculations
-        
-        Args:
-            strike_data: Current strike data dict
-            atm_strike: ATM strike price
-            previous_strike_data: Previous scan's strike data (optional)
-        
-        Returns:
-            Dict with current OI, volumes, premiums, and % changes
+        Get ATM strike data WITH OI change calculations
+        Compares current vs previous scan
         """
-        # Get current ATM data
         current = strike_data.get(atm_strike, {
             'ce_oi': 0,
             'pe_oi': 0,
@@ -113,7 +122,6 @@ class OIAnalyzer:
             'pe_ltp': 0
         })
         
-        # Calculate changes if previous data available
         ce_change_pct = 0.0
         pe_change_pct = 0.0
         
@@ -131,7 +139,7 @@ class OIAnalyzer:
                 ce_diff = curr_ce_oi - prev_ce_oi
                 ce_change_pct = (ce_diff / prev_ce_oi) * 100
             elif curr_ce_oi > 0:
-                ce_change_pct = 100.0  # New OI appeared
+                ce_change_pct = 100.0
             
             # PE OI change
             prev_pe_oi = previous.get('pe_oi', 0)
@@ -144,19 +152,14 @@ class OIAnalyzer:
                 pe_change_pct = 100.0
         
         return {
-            # Current values
             'ce_oi': current.get('ce_oi', 0),
             'pe_oi': current.get('pe_oi', 0),
             'ce_vol': current.get('ce_vol', 0),
             'pe_vol': current.get('pe_vol', 0),
             'ce_ltp': current.get('ce_ltp', 0),
             'pe_ltp': current.get('pe_ltp', 0),
-            
-            # Changes
             'ce_change_pct': round(ce_change_pct, 1),
             'pe_change_pct': round(pe_change_pct, 1),
-            
-            # Meta
             'has_previous_data': previous_strike_data is not None,
             'atm_strike': atm_strike
         }
@@ -164,24 +167,17 @@ class OIAnalyzer:
     @staticmethod
     def check_oi_reversal(signal_type, oi_changes_history, threshold=EXIT_OI_REVERSAL_THRESHOLD):
         """
-        ✅ NEW FUNCTION: Check OI reversal with sustained building
-        
-        Args:
-            signal_type: 'CE' or 'PE'
-            oi_changes_history: List of last 3-5 OI changes
-            threshold: Minimum OI change to consider (default 3.0)
-        
-        Returns:
-            (is_reversal, strength, avg_building, message)
+        Check OI reversal with SUSTAINED building (not single candle spike)
+        Requires EXIT_OI_CONFIRMATION_CANDLES consecutive candles
         """
         if not oi_changes_history or len(oi_changes_history) < EXIT_OI_CONFIRMATION_CANDLES:
             return False, 'none', 0.0, "Insufficient data"
         
-        # Get last N candles (confirmation window)
+        # Get last N candles
         recent = oi_changes_history[-EXIT_OI_CONFIRMATION_CANDLES:]
         current = recent[-1]
         
-        # Count how many candles show building (> threshold)
+        # Count sustained building
         building_count = sum(1 for oi in recent if oi > threshold)
         
         # Strong reversal: ALL recent candles building
@@ -190,12 +186,12 @@ class OIAnalyzer:
             strength = 'strong' if avg_building > 5.0 else 'medium'
             return True, strength, avg_building, f"{signal_type} sustained building: {building_count}/{len(recent)} candles"
         
-        # Very strong single spike (exception case)
+        # Very strong single spike (exception)
         if current > EXIT_OI_SPIKE_THRESHOLD:
             return True, 'spike', current, f"{signal_type} spike: {current:.1f}%"
         
-        # Not a confirmed reversal
-        return False, 'none', current, f"{signal_type} OI change: {current:.1f}% (not confirmed)"
+        # Not confirmed
+        return False, 'none', current, f"{signal_type} OI change: {current:.1f}% (not sustained)"
 
 
 # ==================== Volume Analyzer ====================
@@ -204,7 +200,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def calculate_total_volume(strike_data):
-        """Calculate total CE/PE volume"""
+        """Calculate total CE/PE volume (uses ALL 11 strikes)"""
         if not strike_data:
             return 0, 0
         
@@ -237,7 +233,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def analyze_volume_trend(df, periods=5):
-        """Analyze volume trend"""
+        """Analyze volume trend from futures candles"""
         if df is None or len(df) < periods + 1:
             return {
                 'trend': 'unknown',
@@ -267,7 +263,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def calculate_vwap(df):
-        """Calculate VWAP"""
+        """Calculate VWAP from futures candles"""
         if df is None or len(df) == 0:
             return None
         
@@ -293,27 +289,19 @@ class TechnicalAnalyzer:
     @staticmethod
     def validate_signal_with_vwap(signal_type, spot, vwap, atr):
         """
-        ✅ NEW FUNCTION: Validate if signal should be taken based on VWAP distance
-        
-        Args:
-            signal_type: "CE_BUY" or "PE_BUY"
-            spot: Current spot/futures price
-            vwap: VWAP value
-            atr: Current ATR
-        
-        Returns:
-            (is_valid, reason, confidence_score)
+        Validate if signal should be taken based on VWAP distance
+        BLOCKING CHECK - rejects signals too far from fair value
         """
         if not vwap or not spot or not atr:
             return False, "Missing VWAP/Price data", 0
         
         distance = spot - vwap
         
-        # Calculate buffer (use config or ATR-based)
+        # Calculate buffer
         if VWAP_STRICT_MODE:
             buffer = atr * VWAP_DISTANCE_MAX_ATR_MULTIPLE
         else:
-            buffer = VWAP_BUFFER  # Fixed buffer from config
+            buffer = VWAP_BUFFER
         
         if signal_type == "CE_BUY":
             # CE buy: Price should be near or above VWAP
@@ -322,11 +310,11 @@ class TechnicalAnalyzer:
             elif distance > buffer * 3:
                 return False, f"Price {distance:.0f} pts above VWAP (overextended)", 0
             else:
-                # Score based on proximity (closer = better for CE)
+                # Score based on proximity
                 if distance > 0:
-                    score = min(100, 80 + (distance / buffer * 20))  # Above VWAP = good
+                    score = min(100, 80 + (distance / buffer * 20))
                 else:
-                    score = max(60, 80 - (abs(distance) / buffer * 20))  # Below but close = ok
+                    score = max(60, 80 - (abs(distance) / buffer * 20))
                 return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
         
         elif signal_type == "PE_BUY":
@@ -336,18 +324,18 @@ class TechnicalAnalyzer:
             elif distance < -buffer * 3:
                 return False, f"Price {abs(distance):.0f} pts below VWAP (overextended)", 0
             else:
-                # Score based on proximity (closer = better for PE)
+                # Score based on proximity
                 if distance < 0:
-                    score = min(100, 80 + (abs(distance) / buffer * 20))  # Below VWAP = good
+                    score = min(100, 80 + (abs(distance) / buffer * 20))
                 else:
-                    score = max(60, 80 - (distance / buffer * 20))  # Above but close = ok
+                    score = max(60, 80 - (distance / buffer * 20))
                 return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
         
         return False, "Unknown signal type", 0
     
     @staticmethod
     def calculate_atr(df, period=ATR_PERIOD):
-        """Calculate ATR"""
+        """Calculate ATR from futures candles"""
         if df is None or len(df) < period:
             return ATR_FALLBACK
         
@@ -383,10 +371,10 @@ class TechnicalAnalyzer:
             rejection = False
             rejection_type = None
             
-            if upper_wick > body * 2 and body > 0:
+            if upper_wick > body * EXIT_CANDLE_REJECTION_MULTIPLIER and body > 0:
                 rejection = True
                 rejection_type = 'upper'
-            elif lower_wick > body * 2 and body > 0:
+            elif lower_wick > body * EXIT_CANDLE_REJECTION_MULTIPLIER and body > 0:
                 rejection = True
                 rejection_type = 'lower'
             
@@ -455,7 +443,7 @@ class MarketAnalyzer:
     
     @staticmethod
     def calculate_max_pain(strike_data, spot_price):
-        """Calculate max pain strike"""
+        """Calculate max pain strike (uses all 11 strikes)"""
         if not strike_data:
             return 0, 0.0
         
@@ -486,11 +474,11 @@ class MarketAnalyzer:
     
     @staticmethod
     def detect_gamma_zone():
-        """Check if expiry day"""
+        """Check if expiry day (weekly options)"""
         try:
-            from config import get_next_tuesday_expiry
+            from config import get_next_weekly_expiry
             today = datetime.now(IST).date()
-            expiry = datetime.strptime(get_next_tuesday_expiry(), '%Y-%m-%d').date()
+            expiry = datetime.strptime(get_next_weekly_expiry(), '%Y-%m-%d').date()
             return today == expiry
         except:
             return False
