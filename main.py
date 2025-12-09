@@ -104,7 +104,7 @@ class NiftyTradingBot:
 ✅ Unwinding Analysis: 5 deep strikes
 
 ━━━━━━━━━━━━━━━━━━━━
-🔧 <b>TIMING & WARMUP</b>
+🔧 <b>TIMING &amp; WARMUP</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 • Market Opens: 9:15 AM (ignored - freak trades)
@@ -121,15 +121,15 @@ class NiftyTradingBot:
 ━━━━━━━━━━━━━━━━━━━━
 
 <b>Entry Requirements (AND Logic):</b>
-• 5m OI Unwinding: < -{MIN_OI_5M_FOR_ENTRY}%
-• 15m OI Unwinding: < -{MIN_OI_15M_FOR_ENTRY}%
+• 5m OI Unwinding: &lt; -{MIN_OI_5M_FOR_ENTRY}%
+• 15m OI Unwinding: &lt; -{MIN_OI_15M_FOR_ENTRY}%
 • BOTH timeframes must show unwinding
-• ATM OI Threshold: < -{ATM_OI_THRESHOLD}%
+• ATM OI Threshold: &lt; -{ATM_OI_THRESHOLD}%
 • Volume Spike: ≥ {VOL_SPIKE_MULTIPLIER}x average
 
 <b>Strong Signal:</b>
-• 5m OI: < -{STRONG_OI_5M_THRESHOLD}%
-• 15m OI: < -{STRONG_OI_15M_THRESHOLD}%
+• 5m OI: &lt; -{STRONG_OI_5M_THRESHOLD}%
+• 15m OI: &lt; -{STRONG_OI_15M_THRESHOLD}%
 
 ━━━━━━━━━━━━━━━━━━━━
 🎯 <b>RISK MANAGEMENT</b>
@@ -146,7 +146,7 @@ class NiftyTradingBot:
 • Min Hold Time: {MIN_HOLD_TIME_MINUTES} min
 • OI Exit Hold: {MIN_HOLD_BEFORE_OI_EXIT} min
 • OI Reversal: {EXIT_OI_REVERSAL_THRESHOLD}% sustained
-• Volume Dry: < {EXIT_VOLUME_DRY_THRESHOLD}x
+• Volume Dry: &lt; {EXIT_VOLUME_DRY_THRESHOLD}x
 • Premium Drop: {EXIT_PREMIUM_DROP_PERCENT}% from peak
 
 <b>Re-Entry Protection:</b>
@@ -163,8 +163,8 @@ class NiftyTradingBot:
 • ATR SL Multiple: {ATR_SL_MULTIPLIER}x
 • VWAP Buffer: {VWAP_BUFFER} pts
 • VWAP Strict Mode: {'ON' if VWAP_STRICT_MODE else 'OFF'}
-• PCR Bullish: > {PCR_BULLISH}
-• PCR Bearish: < {PCR_BEARISH}
+• PCR Bullish: &gt; {PCR_BULLISH}
+• PCR Bearish: &lt; {PCR_BEARISH}
 
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Bot started at {current_time}
