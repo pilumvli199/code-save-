@@ -1,6 +1,6 @@
 """
 Signal Engine: Entry Signal Generation & Validation
-FIXED: VWAP validation, better confidence, re-entry protection
+ULTIMATE FIX: Uses active strikes (ATM ± 2), VWAP validation, re-entry protection
 """
 
 from dataclasses import dataclass
@@ -10,7 +10,7 @@ from typing import Optional
 
 from config import *
 from utils import IST, setup_logger
-from analyzers import TechnicalAnalyzer
+from analyzers import TechnicalAnalyzer, OIAnalyzer
 
 logger = setup_logger("signal_engine")
 
@@ -51,6 +51,7 @@ class Signal:
     bonus_checks: int
     trailing_sl_enabled: bool
     is_expiry_day: bool
+    strikes_used: int  # ✅ NEW: Track how many strikes analyzed
     analysis_details: dict
     
     def get_direction(self):
@@ -64,7 +65,7 @@ class Signal:
 
 # ==================== Signal Generator ====================
 class SignalGenerator:
-    """Generate entry signals with FIXED logic"""
+    """Generate entry signals using ACTIVE STRIKES only"""
     
     def __init__(self):
         self.last_signal_time = None
@@ -72,7 +73,11 @@ class SignalGenerator:
         self.last_signal_strike = None
     
     def generate(self, **kwargs):
-        """Generate CE_BUY or PE_BUY signal"""
+        """
+        Generate CE_BUY or PE_BUY signal
+        
+        ✅ Uses filtered active_strike_data (ATM ± 2) for analysis
+        """
         
         # Try CE_BUY
         ce_signal = self._check_ce_buy(**kwargs)
@@ -84,12 +89,16 @@ class SignalGenerator:
         return pe_signal
     
     def _check_ce_buy(self, spot_price, futures_price, vwap, vwap_distance, pcr, atr,
-                      atm_strike, atm_data, ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
+                      atm_strike, atm_data, 
+                      active_strike_data,  # ✅ NEW: Filtered ATM ± 2 strikes
+                      ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
                       atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
                       gamma_zone, momentum, multi_tf, oi_strength='weak'):
         """Check CE_BUY setup with VWAP validation"""
+        
+        logger.debug(f"  🔍 CE_BUY check: Using {len(active_strike_data)} active strikes")
         
         # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
@@ -102,7 +111,7 @@ class SignalGenerator:
         
         logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
         
-        # ✅ STEP 2: Primary checks (STRICTER - both TF required)
+        # ✅ STEP 2: Primary checks (BOTH TF required)
         primary_ce = ce_total_15m < -MIN_OI_15M_FOR_ENTRY and ce_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
         primary_atm = atm_ce_15m < -ATM_OI_THRESHOLD and has_15m_atm
         primary_vol = volume_spike
@@ -114,13 +123,13 @@ class SignalGenerator:
             return None
         
         # ✅ STEP 3: Secondary checks
-        secondary_price = futures_price > vwap  # Above VWAP
+        secondary_price = futures_price > vwap
         secondary_green = candle_data.get('color') == 'GREEN'
         
         # ✅ STEP 4: Bonus checks
         bonus_5m_strong = ce_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
-        bonus_vwap_above = vwap_distance > 0  # Price above VWAP
+        bonus_vwap_above = vwap_distance > 0
         bonus_pcr = pcr > PCR_BULLISH
         bonus_momentum = momentum.get('consecutive_green', 0) >= 2
         bonus_flow = order_flow < 1.0
@@ -130,9 +139,8 @@ class SignalGenerator:
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
         # ✅ STEP 5: Calculate confidence (IMPROVED)
-        confidence = 40  # Base
+        confidence = 40
         
-        # Primary checks (60 points max)
         if primary_ce: 
             if oi_strength == 'strong':
                 confidence += 25
@@ -141,14 +149,11 @@ class SignalGenerator:
         if primary_atm: confidence += 20
         if primary_vol: confidence += 15
         
-        # VWAP score (20 points max)
-        confidence += int(vwap_score / 5)  # Convert 0-100 to 0-20
+        confidence += int(vwap_score / 5)
         
-        # Secondary checks (10 points)
         if secondary_green: confidence += 5
         if secondary_price: confidence += 5
         
-        # Bonus checks (each 1-2 points)
         confidence += min(bonus_passed * 2, 15)
         
         confidence = min(confidence, 98)
@@ -194,10 +199,12 @@ class SignalGenerator:
             bonus_checks=bonus_passed,
             trailing_sl_enabled=ENABLE_TRAILING_SL,
             is_expiry_day=gamma_zone,
+            strikes_used=len(active_strike_data),  # ✅ Track strikes used
             analysis_details={
                 'primary': {'ce_unwinding': primary_ce, 'atm_unwinding': primary_atm, 'volume': primary_vol},
                 'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed
+                'bonus_count': bonus_passed,
+                'active_strikes': sorted(active_strike_data.keys())
             }
         )
         
@@ -208,12 +215,16 @@ class SignalGenerator:
         return signal
     
     def _check_pe_buy(self, spot_price, futures_price, vwap, vwap_distance, pcr, atr,
-                      atm_strike, atm_data, ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
+                      atm_strike, atm_data,
+                      active_strike_data,  # ✅ NEW: Filtered ATM ± 2 strikes
+                      ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
                       atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
                       gamma_zone, momentum, multi_tf, oi_strength='weak'):
         """Check PE_BUY setup with VWAP validation"""
+        
+        logger.debug(f"  🔍 PE_BUY check: Using {len(active_strike_data)} active strikes")
         
         # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
@@ -238,13 +249,13 @@ class SignalGenerator:
             return None
         
         # ✅ STEP 3: Secondary checks
-        secondary_price = futures_price < vwap  # Below VWAP
+        secondary_price = futures_price < vwap
         secondary_red = candle_data.get('color') == 'RED'
         
         # ✅ STEP 4: Bonus checks
         bonus_5m_strong = pe_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
-        bonus_vwap_below = vwap_distance < 0  # Price below VWAP
+        bonus_vwap_below = vwap_distance < 0
         bonus_pcr = pcr < PCR_BEARISH
         bonus_momentum = momentum.get('consecutive_red', 0) >= 2
         bonus_flow = order_flow > 1.5
@@ -254,9 +265,8 @@ class SignalGenerator:
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
         # ✅ STEP 5: Calculate confidence (IMPROVED)
-        confidence = 40  # Base
+        confidence = 40
         
-        # Primary checks (60 points max)
         if primary_pe:
             if oi_strength == 'strong':
                 confidence += 25
@@ -265,14 +275,11 @@ class SignalGenerator:
         if primary_atm: confidence += 20
         if primary_vol: confidence += 15
         
-        # VWAP score (20 points max)
         confidence += int(vwap_score / 5)
         
-        # Secondary checks (10 points)
         if secondary_red: confidence += 5
         if secondary_price: confidence += 5
         
-        # Bonus checks
         confidence += min(bonus_passed * 2, 15)
         
         confidence = min(confidence, 98)
@@ -318,10 +325,12 @@ class SignalGenerator:
             bonus_checks=bonus_passed,
             trailing_sl_enabled=ENABLE_TRAILING_SL,
             is_expiry_day=gamma_zone,
+            strikes_used=len(active_strike_data),  # ✅ Track strikes used
             analysis_details={
                 'primary': {'pe_unwinding': primary_pe, 'atm_unwinding': primary_atm, 'volume': primary_vol},
                 'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed
+                'bonus_count': bonus_passed,
+                'active_strikes': sorted(active_strike_data.keys())
             }
         )
         
@@ -339,7 +348,7 @@ class SignalValidator:
     def __init__(self):
         self.last_signal_time = None
         self.signal_count = 0
-        self.recent_signals = []  # Track last 10 signals
+        self.recent_signals = []
         self.last_exit_time = None
         self.last_exit_type = None
         self.last_exit_strike = None
@@ -354,7 +363,7 @@ class SignalValidator:
             logger.info("⏸️ Signal in cooldown")
             return None
         
-        # ✅ Check 2: Duplicate signal (same direction + strike in 10 min)
+        # ✅ Check 2: Duplicate signal
         if self._is_duplicate_signal(signal):
             logger.info("⚠️ Duplicate signal ignored (same direction+strike in last 10min)")
             return None
@@ -388,13 +397,12 @@ class SignalValidator:
             'confidence': signal.confidence
         })
         
-        # Keep only last 10
         self.recent_signals = self.recent_signals[-10:]
         
         self.last_signal_time = datetime.now(IST)
         self.signal_count += 1
         
-        logger.info(f"✅ Signal validated: {signal.signal_type.value} @ {signal.atm_strike} ({signal.confidence}%)")
+        logger.info(f"✅ Signal validated: {signal.signal_type.value} @ {signal.atm_strike} ({signal.confidence}%) using {signal.strikes_used} strikes")
         
         return signal
     
@@ -445,7 +453,6 @@ class SignalValidator:
         
         elapsed_minutes = (datetime.now(IST) - self.last_exit_time).total_seconds() / 60
         
-        # Check if opposite direction
         opposite = (
             (self.last_exit_type == SignalType.CE_BUY and signal.signal_type == SignalType.PE_BUY) or
             (self.last_exit_type == SignalType.PE_BUY and signal.signal_type == SignalType.CE_BUY)
