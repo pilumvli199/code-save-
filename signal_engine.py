@@ -1,505 +1,465 @@
 """
-Market Analyzers: OI, Volume, Technical, Market Structure
-COMPLETE VERSION: Active strikes filter, ATM OI tracking, VWAP validation
+Signal Engine: Entry Signal Generation & Validation
+FIXED: VWAP validation, better confidence, re-entry protection
 """
 
-import pandas as pd
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Optional
+
 from config import *
 from utils import IST, setup_logger
+from analyzers import TechnicalAnalyzer
 
-logger = setup_logger("analyzers")
-
-
-# ==================== OI Analyzer ====================
-class OIAnalyzer:
-    """Open Interest analysis with active strikes filtering"""
-    
-    @staticmethod
-    def get_active_strikes_for_analysis(strike_data, atm_strike):
-        """
-        Filter to ATM ± 2 strikes for HIGH PRECISION analysis
-        
-        Args:
-            strike_data: All 11 strikes from Redis
-            atm_strike: Current ATM
-        
-        Returns:
-            Filtered dict with only 5 strikes (ATM ± 2)
-        """
-        min_strike, max_strike = get_analysis_strike_range(atm_strike)
-        
-        active_strikes = {
-            strike: data 
-            for strike, data in strike_data.items()
-            if min_strike <= strike <= max_strike
-        }
-        
-        logger.info(f"   🎯 Analysis range: {min_strike} to {max_strike} ({len(active_strikes)} strikes)")
-        logger.debug(f"   📊 Active strikes: {sorted(active_strikes.keys())}")
-        
-        return active_strikes
-    
-    @staticmethod
-    def calculate_total_oi(strike_data):
-        """Calculate total CE/PE OI"""
-        if not strike_data:
-            return 0, 0
-        
-        total_ce = sum(d.get('ce_oi', 0) for d in strike_data.values())
-        total_pe = sum(d.get('pe_oi', 0) for d in strike_data.values())
-        
-        return total_ce, total_pe
-    
-    @staticmethod
-    def calculate_pcr(total_pe, total_ce):
-        """Calculate Put-Call Ratio with neutral default"""
-        if total_ce == 0:
-            if total_pe == 0:
-                return 1.0
-            else:
-                return 10.0
-        
-        pcr = total_pe / total_ce
-        return round(min(pcr, 10.0), 2)
-    
-    @staticmethod
-    def detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m):
-        """
-        Detect CE/PE unwinding - BOTH timeframes required (AND logic)
-        """
-        # CE unwinding - BOTH timeframes
-        ce_unwinding = (ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY)
-        
-        if ce_15m < -STRONG_OI_15M_THRESHOLD and ce_5m < -STRONG_OI_5M_THRESHOLD:
-            ce_strength = 'strong'
-        elif ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY:
-            ce_strength = 'medium'
-        else:
-            ce_strength = 'weak'
-        
-        # PE unwinding - BOTH timeframes
-        pe_unwinding = (pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY)
-        
-        if pe_15m < -STRONG_OI_15M_THRESHOLD and pe_5m < -STRONG_OI_5M_THRESHOLD:
-            pe_strength = 'strong'
-        elif pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY:
-            pe_strength = 'medium'
-        else:
-            pe_strength = 'weak'
-        
-        # Multi-timeframe confirmation
-        multi_tf = (ce_5m < -2.0 and ce_15m < -3.0) or (pe_5m < -2.0 and pe_15m < -3.0)
-        
-        return {
-            'ce_unwinding': ce_unwinding,
-            'pe_unwinding': pe_unwinding,
-            'ce_strength': ce_strength,
-            'pe_strength': pe_strength,
-            'multi_timeframe': multi_tf
-        }
-    
-    @staticmethod
-    def get_atm_data(strike_data, atm_strike):
-        """Get ATM strike data (current values only)"""
-        return strike_data.get(atm_strike, {
-            'ce_oi': 0,
-            'pe_oi': 0,
-            'ce_vol': 0,
-            'pe_vol': 0,
-            'ce_ltp': 0,
-            'pe_ltp': 0
-        })
-    
-    @staticmethod
-    def get_atm_oi_changes(strike_data, atm_strike, previous_strike_data=None):
-        """
-        Get ATM OI data WITH percentage changes
-        
-        Uses previous_strike_data from last scan (stored in main.py)
-        """
-        current = strike_data.get(atm_strike, {
-            'ce_oi': 0,
-            'pe_oi': 0,
-            'ce_vol': 0,
-            'pe_vol': 0,
-            'ce_ltp': 0,
-            'pe_ltp': 0
-        })
-        
-        ce_change_pct = 0.0
-        pe_change_pct = 0.0
-        
-        if previous_strike_data:
-            previous = previous_strike_data.get(atm_strike, {
-                'ce_oi': 0,
-                'pe_oi': 0
-            })
-            
-            prev_ce_oi = previous.get('ce_oi', 0)
-            curr_ce_oi = current.get('ce_oi', 0)
-            
-            if prev_ce_oi > 0:
-                ce_diff = curr_ce_oi - prev_ce_oi
-                ce_change_pct = (ce_diff / prev_ce_oi) * 100
-            elif curr_ce_oi > 0:
-                ce_change_pct = 100.0
-            
-            prev_pe_oi = previous.get('pe_oi', 0)
-            curr_pe_oi = current.get('pe_oi', 0)
-            
-            if prev_pe_oi > 0:
-                pe_diff = curr_pe_oi - prev_pe_oi
-                pe_change_pct = (pe_diff / prev_pe_oi) * 100
-            elif curr_pe_oi > 0:
-                pe_change_pct = 100.0
-        
-        return {
-            'ce_oi': current.get('ce_oi', 0),
-            'pe_oi': current.get('pe_oi', 0),
-            'ce_vol': current.get('ce_vol', 0),
-            'pe_vol': current.get('pe_vol', 0),
-            'ce_ltp': current.get('ce_ltp', 0),
-            'pe_ltp': current.get('pe_ltp', 0),
-            'ce_change_pct': round(ce_change_pct, 1),
-            'pe_change_pct': round(pe_change_pct, 1),
-            'has_previous_data': previous_strike_data is not None,
-            'atm_strike': atm_strike
-        }
-    
-    @staticmethod
-    def check_oi_reversal(signal_type, oi_changes_history, threshold=EXIT_OI_REVERSAL_THRESHOLD):
-        """
-        Check OI reversal with sustained building over 2+ candles
-        """
-        if not oi_changes_history or len(oi_changes_history) < EXIT_OI_CONFIRMATION_CANDLES:
-            return False, 'none', 0.0, "Insufficient data"
-        
-        recent = oi_changes_history[-EXIT_OI_CONFIRMATION_CANDLES:]
-        current = recent[-1]
-        
-        building_count = sum(1 for oi in recent if oi > threshold)
-        
-        # Strong reversal: ALL recent candles building
-        if building_count >= EXIT_OI_CONFIRMATION_CANDLES:
-            avg_building = sum(recent) / len(recent)
-            strength = 'strong' if avg_building > 5.0 else 'medium'
-            return True, strength, avg_building, f"{signal_type} sustained building: {building_count}/{len(recent)} candles"
-        
-        # Very strong single spike
-        if current > EXIT_OI_SPIKE_THRESHOLD:
-            return True, 'spike', current, f"{signal_type} spike: {current:.1f}%"
-        
-        return False, 'none', current, f"{signal_type} OI change: {current:.1f}% (not confirmed)"
+logger = setup_logger("signal_engine")
 
 
-# ==================== Volume Analyzer ====================
-class VolumeAnalyzer:
-    """Volume and order flow analysis"""
-    
-    @staticmethod
-    def calculate_total_volume(strike_data):
-        """Calculate total CE/PE volume"""
-        if not strike_data:
-            return 0, 0
-        
-        ce_vol = sum(d.get('ce_vol', 0) for d in strike_data.values())
-        pe_vol = sum(d.get('pe_vol', 0) for d in strike_data.values())
-        return ce_vol, pe_vol
-    
-    @staticmethod
-    def detect_volume_spike(current, avg):
-        """Detect volume spike"""
-        if avg == 0:
-            return False, 0.0
-        ratio = current / avg
-        return ratio >= VOL_SPIKE_MULTIPLIER, round(ratio, 2)
-    
-    @staticmethod
-    def calculate_order_flow(strike_data):
-        """Calculate order flow ratio"""
-        ce_vol, pe_vol = VolumeAnalyzer.calculate_total_volume(strike_data)
-        
-        if ce_vol == 0 and pe_vol == 0:
-            return 1.0
-        elif pe_vol == 0:
-            return 5.0
-        elif ce_vol == 0:
-            return 0.2
-        
-        ratio = ce_vol / pe_vol
-        return round(max(0.2, min(ratio, 5.0)), 2)
-    
-    @staticmethod
-    def analyze_volume_trend(df, periods=5):
-        """Analyze volume trend"""
-        if df is None or len(df) < periods + 1:
-            return {
-                'trend': 'unknown',
-                'avg_volume': 0,
-                'current_volume': 0,
-                'ratio': 1.0
-            }
-        
-        recent = df['volume'].tail(periods + 1)
-        avg = recent.iloc[:-1].mean()
-        current = recent.iloc[-1]
-        ratio = current / avg if avg > 0 else 1.0
-        
-        trend = 'increasing' if ratio > 1.3 else 'decreasing' if ratio < 0.7 else 'stable'
-        
-        return {
-            'trend': trend,
-            'avg_volume': round(avg, 2),
-            'current_volume': round(current, 2),
-            'ratio': round(ratio, 2)
-        }
+# ==================== Signal Models ====================
+class SignalType(Enum):
+    CE_BUY = "CE_BUY"
+    PE_BUY = "PE_BUY"
 
 
-# ==================== Technical Analyzer ====================
-class TechnicalAnalyzer:
-    """Technical indicators: VWAP, ATR, Candles"""
+@dataclass
+class Signal:
+    """Trading signal data structure"""
+    signal_type: SignalType
+    timestamp: datetime
+    entry_price: float
+    target_price: float
+    stop_loss: float
+    atm_strike: int
+    recommended_strike: int
+    option_premium: float
+    premium_sl: float
+    vwap: float
+    vwap_distance: float
+    vwap_score: int
+    atr: float
+    oi_5m: float
+    oi_15m: float
+    oi_strength: str
+    atm_ce_change: float
+    atm_pe_change: float
+    pcr: float
+    volume_spike: bool
+    volume_ratio: float
+    order_flow: float
+    confidence: int
+    primary_checks: int
+    bonus_checks: int
+    trailing_sl_enabled: bool
+    is_expiry_day: bool
+    analysis_details: dict
     
-    @staticmethod
-    def calculate_vwap(df):
-        """Calculate VWAP"""
-        if df is None or len(df) == 0:
+    def get_direction(self):
+        return "BULLISH" if self.signal_type == SignalType.CE_BUY else "BEARISH"
+    
+    def get_rr_ratio(self):
+        risk = abs(self.entry_price - self.stop_loss)
+        reward = abs(self.target_price - self.entry_price)
+        return round(reward / risk, 2) if risk > 0 else 0.0
+
+
+# ==================== Signal Generator ====================
+class SignalGenerator:
+    """Generate entry signals with FIXED logic"""
+    
+    def __init__(self):
+        self.last_signal_time = None
+        self.last_signal_type = None
+        self.last_signal_strike = None
+    
+    def generate(self, **kwargs):
+        """Generate CE_BUY or PE_BUY signal"""
+        
+        # Try CE_BUY
+        ce_signal = self._check_ce_buy(**kwargs)
+        if ce_signal:
+            return ce_signal
+        
+        # Try PE_BUY
+        pe_signal = self._check_pe_buy(**kwargs)
+        return pe_signal
+    
+    def _check_ce_buy(self, spot_price, futures_price, vwap, vwap_distance, pcr, atr,
+                      atm_strike, atm_data, ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
+                      atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
+                      has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
+                      volume_spike, volume_ratio, order_flow, candle_data, 
+                      gamma_zone, momentum, multi_tf, oi_strength='weak'):
+        """Check CE_BUY setup with VWAP validation"""
+        
+        # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
+        vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
+            "CE_BUY", futures_price, vwap, atr
+        )
+        
+        if not vwap_valid:
+            logger.debug(f"  ❌ CE_BUY rejected: {vwap_reason}")
             return None
         
-        try:
-            df_copy = df.copy()
-            df_copy['typical_price'] = (df_copy['high'] + df_copy['low'] + df_copy['close']) / 3
-            df_copy['vol_price'] = df_copy['typical_price'] * df_copy['volume']
-            df_copy['cum_vol_price'] = df_copy['vol_price'].cumsum()
-            df_copy['cum_volume'] = df_copy['volume'].cumsum()
-            df_copy['vwap'] = df_copy['cum_vol_price'] / df_copy['cum_volume']
-            return round(df_copy['vwap'].iloc[-1], 2)
-        except Exception as e:
-            logger.error(f"❌ VWAP error: {e}")
+        logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        
+        # ✅ STEP 2: Primary checks (STRICTER - both TF required)
+        primary_ce = ce_total_15m < -MIN_OI_15M_FOR_ENTRY and ce_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
+        primary_atm = atm_ce_15m < -ATM_OI_THRESHOLD and has_15m_atm
+        primary_vol = volume_spike
+        
+        primary_passed = sum([primary_ce, primary_atm, primary_vol])
+        
+        if primary_passed < MIN_PRIMARY_CHECKS:
+            logger.debug(f"  ❌ CE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
             return None
-    
-    @staticmethod
-    def calculate_vwap_distance(price, vwap):
-        """Calculate distance from VWAP"""
-        if not vwap or not price:
-            return 0
-        return round(price - vwap, 2)
-    
-    @staticmethod
-    def validate_signal_with_vwap(signal_type, spot, vwap, atr):
-        """
-        Validate signal based on VWAP distance - BLOCKING CHECK
-        """
-        if not vwap or not spot or not atr:
-            return False, "Missing VWAP/Price data", 0
         
-        distance = spot - vwap
+        # ✅ STEP 3: Secondary checks
+        secondary_price = futures_price > vwap  # Above VWAP
+        secondary_green = candle_data.get('color') == 'GREEN'
         
-        if VWAP_STRICT_MODE:
-            buffer = atr * VWAP_DISTANCE_MAX_ATR_MULTIPLE
-        else:
-            buffer = VWAP_BUFFER
+        # ✅ STEP 4: Bonus checks
+        bonus_5m_strong = ce_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
+        bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
+        bonus_vwap_above = vwap_distance > 0  # Price above VWAP
+        bonus_pcr = pcr > PCR_BULLISH
+        bonus_momentum = momentum.get('consecutive_green', 0) >= 2
+        bonus_flow = order_flow < 1.0
+        bonus_vol_strong = volume_ratio >= VOL_SPIKE_STRONG
         
-        if signal_type == "CE_BUY":
-            if distance < -buffer:
-                return False, f"Price {abs(distance):.0f} pts below VWAP (too far)", 0
-            elif distance > buffer * 3:
-                return False, f"Price {distance:.0f} pts above VWAP (overextended)", 0
+        bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_above, bonus_pcr, 
+                           bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
+        
+        # ✅ STEP 5: Calculate confidence (IMPROVED)
+        confidence = 40  # Base
+        
+        # Primary checks (60 points max)
+        if primary_ce: 
+            if oi_strength == 'strong':
+                confidence += 25
             else:
-                if distance > 0:
-                    score = min(100, 80 + (distance / buffer * 20))
-                else:
-                    score = max(60, 80 - (abs(distance) / buffer * 20))
-                return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
+                confidence += 20
+        if primary_atm: confidence += 20
+        if primary_vol: confidence += 15
         
-        elif signal_type == "PE_BUY":
-            if distance > buffer:
-                return False, f"Price {distance:.0f} pts above VWAP (too far)", 0
-            elif distance < -buffer * 3:
-                return False, f"Price {abs(distance):.0f} pts below VWAP (overextended)", 0
+        # VWAP score (20 points max)
+        confidence += int(vwap_score / 5)  # Convert 0-100 to 0-20
+        
+        # Secondary checks (10 points)
+        if secondary_green: confidence += 5
+        if secondary_price: confidence += 5
+        
+        # Bonus checks (each 1-2 points)
+        confidence += min(bonus_passed * 2, 15)
+        
+        confidence = min(confidence, 98)
+        
+        if confidence < MIN_CONFIDENCE:
+            logger.debug(f"  ❌ CE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
+            return None
+        
+        # ✅ STEP 6: Calculate levels
+        sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
+        entry = futures_price
+        target = entry + int(atr * ATR_TARGET_MULTIPLIER)
+        sl = entry - int(atr * sl_mult)
+        
+        premium = atm_data.get('ce_ltp', 150.0)
+        premium_sl = premium * (1 - PREMIUM_SL_PERCENT / 100) if USE_PREMIUM_SL else 0
+        
+        signal = Signal(
+            signal_type=SignalType.CE_BUY,
+            timestamp=datetime.now(IST),
+            entry_price=entry,
+            target_price=target,
+            stop_loss=sl,
+            atm_strike=atm_strike,
+            recommended_strike=atm_strike,
+            option_premium=premium,
+            premium_sl=premium_sl,
+            vwap=vwap,
+            vwap_distance=vwap_distance,
+            vwap_score=vwap_score,
+            atr=atr,
+            oi_5m=ce_total_5m,
+            oi_15m=ce_total_15m,
+            oi_strength=oi_strength,
+            atm_ce_change=atm_ce_15m,
+            atm_pe_change=atm_pe_15m,
+            pcr=pcr,
+            volume_spike=volume_spike,
+            volume_ratio=volume_ratio,
+            order_flow=order_flow,
+            confidence=confidence,
+            primary_checks=primary_passed,
+            bonus_checks=bonus_passed,
+            trailing_sl_enabled=ENABLE_TRAILING_SL,
+            is_expiry_day=gamma_zone,
+            analysis_details={
+                'primary': {'ce_unwinding': primary_ce, 'atm_unwinding': primary_atm, 'volume': primary_vol},
+                'vwap_reason': vwap_reason,
+                'bonus_count': bonus_passed
+            }
+        )
+        
+        self.last_signal_time = datetime.now(IST)
+        self.last_signal_type = SignalType.CE_BUY
+        self.last_signal_strike = atm_strike
+        
+        return signal
+    
+    def _check_pe_buy(self, spot_price, futures_price, vwap, vwap_distance, pcr, atr,
+                      atm_strike, atm_data, ce_total_5m, pe_total_5m, ce_total_15m, pe_total_15m,
+                      atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
+                      has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
+                      volume_spike, volume_ratio, order_flow, candle_data, 
+                      gamma_zone, momentum, multi_tf, oi_strength='weak'):
+        """Check PE_BUY setup with VWAP validation"""
+        
+        # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
+        vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
+            "PE_BUY", futures_price, vwap, atr
+        )
+        
+        if not vwap_valid:
+            logger.debug(f"  ❌ PE_BUY rejected: {vwap_reason}")
+            return None
+        
+        logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        
+        # ✅ STEP 2: Primary checks (STRICTER)
+        primary_pe = pe_total_15m < -MIN_OI_15M_FOR_ENTRY and pe_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
+        primary_atm = atm_pe_15m < -ATM_OI_THRESHOLD and has_15m_atm
+        primary_vol = volume_spike
+        
+        primary_passed = sum([primary_pe, primary_atm, primary_vol])
+        
+        if primary_passed < MIN_PRIMARY_CHECKS:
+            logger.debug(f"  ❌ PE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
+            return None
+        
+        # ✅ STEP 3: Secondary checks
+        secondary_price = futures_price < vwap  # Below VWAP
+        secondary_red = candle_data.get('color') == 'RED'
+        
+        # ✅ STEP 4: Bonus checks
+        bonus_5m_strong = pe_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
+        bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
+        bonus_vwap_below = vwap_distance < 0  # Price below VWAP
+        bonus_pcr = pcr < PCR_BEARISH
+        bonus_momentum = momentum.get('consecutive_red', 0) >= 2
+        bonus_flow = order_flow > 1.5
+        bonus_vol_strong = volume_ratio >= VOL_SPIKE_STRONG
+        
+        bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_below, bonus_pcr,
+                           bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
+        
+        # ✅ STEP 5: Calculate confidence (IMPROVED)
+        confidence = 40  # Base
+        
+        # Primary checks (60 points max)
+        if primary_pe:
+            if oi_strength == 'strong':
+                confidence += 25
             else:
-                if distance < 0:
-                    score = min(100, 80 + (abs(distance) / buffer * 20))
-                else:
-                    score = max(60, 80 - (distance / buffer * 20))
-                return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
+                confidence += 20
+        if primary_atm: confidence += 20
+        if primary_vol: confidence += 15
         
-        return False, "Unknown signal type", 0
-    
-    @staticmethod
-    def calculate_atr(df, period=ATR_PERIOD):
-        """Calculate ATR"""
-        if df is None or len(df) < period:
-            return ATR_FALLBACK
+        # VWAP score (20 points max)
+        confidence += int(vwap_score / 5)
         
-        try:
-            df_copy = df.copy()
-            df_copy['h_l'] = df_copy['high'] - df_copy['low']
-            df_copy['h_cp'] = abs(df_copy['high'] - df_copy['close'].shift(1))
-            df_copy['l_cp'] = abs(df_copy['low'] - df_copy['close'].shift(1))
-            df_copy['tr'] = df_copy[['h_l', 'h_cp', 'l_cp']].max(axis=1)
-            atr = df_copy['tr'].rolling(window=period).mean().iloc[-1]
-            return round(atr, 2)
-        except Exception as e:
-            logger.error(f"❌ ATR error: {e}")
-            return ATR_FALLBACK
-    
-    @staticmethod
-    def analyze_candle(df):
-        """Analyze current candle"""
-        if df is None or len(df) == 0:
-            return TechnicalAnalyzer._empty_candle()
+        # Secondary checks (10 points)
+        if secondary_red: confidence += 5
+        if secondary_price: confidence += 5
         
-        try:
-            candle = df.iloc[-1]
-            o, h, l, c = candle['open'], candle['high'], candle['low'], candle['close']
-            
-            total_size = h - l
-            body = abs(c - o)
-            upper_wick = h - max(o, c)
-            lower_wick = min(o, c) - l
-            
-            color = 'GREEN' if c > o else 'RED' if c < o else 'DOJI'
-            
-            rejection = False
-            rejection_type = None
-            
-            if upper_wick > body * 2 and body > 0:
-                rejection = True
-                rejection_type = 'upper'
-            elif lower_wick > body * 2 and body > 0:
-                rejection = True
-                rejection_type = 'lower'
-            
-            return {
-                'color': color,
-                'size': round(total_size, 2),
-                'body_size': round(body, 2),
-                'upper_wick': round(upper_wick, 2),
-                'lower_wick': round(lower_wick, 2),
-                'rejection': rejection,
-                'rejection_type': rejection_type,
-                'open': o,
-                'high': h,
-                'low': l,
-                'close': c
+        # Bonus checks
+        confidence += min(bonus_passed * 2, 15)
+        
+        confidence = min(confidence, 98)
+        
+        if confidence < MIN_CONFIDENCE:
+            logger.debug(f"  ❌ PE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
+            return None
+        
+        # ✅ STEP 6: Calculate levels
+        sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
+        entry = futures_price
+        target = entry - int(atr * ATR_TARGET_MULTIPLIER)
+        sl = entry + int(atr * sl_mult)
+        
+        premium = atm_data.get('pe_ltp', 150.0)
+        premium_sl = premium * (1 - PREMIUM_SL_PERCENT / 100) if USE_PREMIUM_SL else 0
+        
+        signal = Signal(
+            signal_type=SignalType.PE_BUY,
+            timestamp=datetime.now(IST),
+            entry_price=entry,
+            target_price=target,
+            stop_loss=sl,
+            atm_strike=atm_strike,
+            recommended_strike=atm_strike,
+            option_premium=premium,
+            premium_sl=premium_sl,
+            vwap=vwap,
+            vwap_distance=vwap_distance,
+            vwap_score=vwap_score,
+            atr=atr,
+            oi_5m=pe_total_5m,
+            oi_15m=pe_total_15m,
+            oi_strength=oi_strength,
+            atm_ce_change=atm_ce_15m,
+            atm_pe_change=atm_pe_15m,
+            pcr=pcr,
+            volume_spike=volume_spike,
+            volume_ratio=volume_ratio,
+            order_flow=order_flow,
+            confidence=confidence,
+            primary_checks=primary_passed,
+            bonus_checks=bonus_passed,
+            trailing_sl_enabled=ENABLE_TRAILING_SL,
+            is_expiry_day=gamma_zone,
+            analysis_details={
+                'primary': {'pe_unwinding': primary_pe, 'atm_unwinding': primary_atm, 'volume': primary_vol},
+                'vwap_reason': vwap_reason,
+                'bonus_count': bonus_passed
             }
-        except Exception as e:
-            logger.error(f"❌ Candle error: {e}")
-            return TechnicalAnalyzer._empty_candle()
-    
-    @staticmethod
-    def detect_momentum(df, periods=3):
-        """Detect price momentum"""
-        if df is None or len(df) < periods:
-            return {
-                'direction': 'unknown',
-                'strength': 0,
-                'consecutive_green': 0,
-                'consecutive_red': 0
-            }
+        )
         
-        recent = df.tail(periods)
-        green = sum(recent['close'] > recent['open'])
-        red = sum(recent['close'] < recent['open'])
+        self.last_signal_time = datetime.now(IST)
+        self.last_signal_type = SignalType.PE_BUY
+        self.last_signal_strike = atm_strike
         
-        direction = 'bullish' if green >= 2 else 'bearish' if red >= 2 else 'sideways'
-        strength = green if green >= 2 else red if red >= 2 else 0
-        
-        return {
-            'direction': direction,
-            'strength': strength,
-            'consecutive_green': green,
-            'consecutive_red': red
-        }
-    
-    @staticmethod
-    def _empty_candle():
-        return {
-            'color': 'UNKNOWN',
-            'size': 0,
-            'body_size': 0,
-            'upper_wick': 0,
-            'lower_wick': 0,
-            'rejection': False,
-            'rejection_type': None,
-            'open': 0,
-            'high': 0,
-            'low': 0,
-            'close': 0
-        }
+        return signal
 
 
-# ==================== Market Analyzer ====================
-class MarketAnalyzer:
-    """Market structure analysis"""
+# ==================== Signal Validator ====================
+class SignalValidator:
+    """Validate and manage signal cooldown with re-entry protection"""
     
-    @staticmethod
-    def calculate_max_pain(strike_data, spot_price):
-        """Calculate max pain strike"""
-        if not strike_data:
-            return 0, 0.0
-        
-        strikes = sorted(strike_data.keys())
-        if not strikes:
-            return 0, 0.0
-        
-        max_pain_strike = strikes[len(strikes) // 2]
-        min_pain = float('inf')
-        
-        for test_strike in strikes:
-            total_pain = 0.0
-            
-            for strike, data in strike_data.items():
-                ce_oi = data.get('ce_oi', 0)
-                pe_oi = data.get('pe_oi', 0)
-                
-                if test_strike > strike:
-                    total_pain += ce_oi * (test_strike - strike)
-                if test_strike < strike:
-                    total_pain += pe_oi * (strike - test_strike)
-            
-            if total_pain < min_pain:
-                min_pain = total_pain
-                max_pain_strike = test_strike
-        
-        return max_pain_strike, round(min_pain, 2)
+    def __init__(self):
+        self.last_signal_time = None
+        self.signal_count = 0
+        self.recent_signals = []  # Track last 10 signals
+        self.last_exit_time = None
+        self.last_exit_type = None
+        self.last_exit_strike = None
     
-    @staticmethod
-    def detect_gamma_zone():
-        """Check if expiry day"""
-        try:
-            from config import get_next_tuesday_expiry
-            today = datetime.now(IST).date()
-            expiry = datetime.strptime(get_next_tuesday_expiry(), '%Y-%m-%d').date()
-            return today == expiry
-        except:
+    def validate(self, signal):
+        """Validate signal with enhanced duplicate/re-entry checks"""
+        if signal is None:
+            return None
+        
+        # ✅ Check 1: Basic cooldown
+        if not self._check_cooldown():
+            logger.info("⏸️ Signal in cooldown")
+            return None
+        
+        # ✅ Check 2: Duplicate signal (same direction + strike in 10 min)
+        if self._is_duplicate_signal(signal):
+            logger.info("⚠️ Duplicate signal ignored (same direction+strike in last 10min)")
+            return None
+        
+        # ✅ Check 3: Same strike re-entry protection
+        if self._is_same_strike_too_soon(signal):
+            logger.info(f"⚠️ Same strike {signal.atm_strike} re-entry blocked (need {SAME_STRIKE_COOLDOWN_MINUTES}min gap)")
+            return None
+        
+        # ✅ Check 4: Opposite signal after exit protection
+        if self._is_opposite_too_soon(signal):
+            logger.info(f"⚠️ Opposite signal too soon after exit (need {OPPOSITE_SIGNAL_COOLDOWN_MINUTES}min gap)")
+            return None
+        
+        # ✅ Check 5: R:R validation
+        rr = signal.get_rr_ratio()
+        if rr < 1.0:
+            logger.warning(f"⚠️ Poor R:R: {rr:.2f}")
+            return None
+        
+        # ✅ Check 6: Confidence validation
+        if signal.confidence < MIN_CONFIDENCE:
+            logger.warning(f"⚠️ Low confidence: {signal.confidence}%")
+            return None
+        
+        # ✅ Track signal
+        self.recent_signals.append({
+            'type': signal.signal_type,
+            'strike': signal.atm_strike,
+            'time': signal.timestamp,
+            'confidence': signal.confidence
+        })
+        
+        # Keep only last 10
+        self.recent_signals = self.recent_signals[-10:]
+        
+        self.last_signal_time = datetime.now(IST)
+        self.signal_count += 1
+        
+        logger.info(f"✅ Signal validated: {signal.signal_type.value} @ {signal.atm_strike} ({signal.confidence}%)")
+        
+        return signal
+    
+    def record_exit(self, signal_type, strike):
+        """Record exit for re-entry protection"""
+        self.last_exit_time = datetime.now(IST)
+        self.last_exit_type = signal_type
+        self.last_exit_strike = strike
+        logger.debug(f"📝 Exit recorded: {signal_type.value} @ {strike}")
+    
+    def _check_cooldown(self):
+        """Check basic cooldown period"""
+        if self.last_signal_time is None:
+            return True
+        
+        elapsed = (datetime.now(IST) - self.last_signal_time).total_seconds()
+        return elapsed >= SIGNAL_COOLDOWN_SECONDS
+    
+    def _is_duplicate_signal(self, signal):
+        """Check if same signal in last 10 minutes"""
+        cutoff = datetime.now(IST) - timedelta(minutes=10)
+        
+        for old in self.recent_signals:
+            if (old['type'] == signal.signal_type and 
+                old['strike'] == signal.atm_strike and
+                old['time'] > cutoff):
+                return True
+        
+        return False
+    
+    def _is_same_strike_too_soon(self, signal):
+        """Check if same strike re-entry too soon"""
+        if not self.last_exit_time or not self.last_exit_strike:
             return False
+        
+        elapsed_minutes = (datetime.now(IST) - self.last_exit_time).total_seconds() / 60
+        
+        if (signal.atm_strike == self.last_exit_strike and 
+            elapsed_minutes < SAME_STRIKE_COOLDOWN_MINUTES):
+            return True
+        
+        return False
     
-    @staticmethod
-    def calculate_sentiment(pcr, order_flow, ce_change, pe_change):
-        """Calculate market sentiment"""
-        bullish = 0
-        bearish = 0
+    def _is_opposite_too_soon(self, signal):
+        """Check if opposite signal too soon after exit"""
+        if not self.last_exit_time or not self.last_exit_type:
+            return False
         
-        if pcr > PCR_BULLISH:
-            bullish += 1
-        elif pcr < PCR_BEARISH:
-            bearish += 1
+        elapsed_minutes = (datetime.now(IST) - self.last_exit_time).total_seconds() / 60
         
-        if order_flow < 1.0:
-            bullish += 1
-        elif order_flow > 1.5:
-            bearish += 1
+        # Check if opposite direction
+        opposite = (
+            (self.last_exit_type == SignalType.CE_BUY and signal.signal_type == SignalType.PE_BUY) or
+            (self.last_exit_type == SignalType.PE_BUY and signal.signal_type == SignalType.CE_BUY)
+        )
         
-        if ce_change < -2.0:
-            bullish += 1
-        if pe_change < -2.0:
-            bearish += 1
+        if opposite and elapsed_minutes < OPPOSITE_SIGNAL_COOLDOWN_MINUTES:
+            return True
         
-        if bullish > bearish:
-            return "BULLISH"
-        elif bearish > bullish:
-            return "BEARISH"
-        else:
-            return "NEUTRAL"
+        return False
+    
+    def get_cooldown_remaining(self):
+        """Get seconds until next signal"""
+        if self.last_signal_time is None:
+            return 0
+        
+        elapsed = (datetime.now(IST) - self.last_signal_time).total_seconds()
+        return max(0, int(SIGNAL_COOLDOWN_SECONDS - elapsed))
