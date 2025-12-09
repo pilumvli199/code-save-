@@ -133,7 +133,7 @@ class UpstoxClient:
                 logger.error("❌ NIFTY spot not found")
                 return False
             
-            # Find MONTHLY futures (not weekly!)
+            # Find MONTHLY futures (last Thursday, not weekly)
             now = datetime.now(IST)
             futures_list = []
             
@@ -152,8 +152,10 @@ class UpstoxClient:
                 try:
                     expiry_dt = datetime.fromtimestamp(expiry_ms / 1000, tz=IST)
                     
-                    # Only consider futures that expire after today
-                    if expiry_dt > now:
+                    # Only consider futures that:
+                    # 1. Expire AFTER today
+                    # 2. Expire on THURSDAY (monthly futures)
+                    if expiry_dt > now and expiry_dt.weekday() == 3:
                         futures_list.append({
                             'key': instrument.get('instrument_key'),
                             'expiry': expiry_dt,
@@ -164,13 +166,13 @@ class UpstoxClient:
                     continue
             
             if not futures_list:
-                logger.error("❌ No futures found")
+                logger.error("❌ No MONTHLY futures found (Thursday expiry)")
                 return False
             
-            # Sort by expiry date
+            # Sort by expiry date - get NEAREST monthly futures
             futures_list.sort(key=lambda x: x['expiry'])
             
-            # Get nearest futures (which should be monthly)
+            # Get nearest MONTHLY (Thursday) futures
             nearest = futures_list[0]
             
             self.futures_key = nearest['key']
@@ -179,12 +181,7 @@ class UpstoxClient:
             
             logger.info(f"✅ Futures: {nearest['symbol']}")
             logger.info(f"   Expiry: {nearest['expiry'].strftime('%Y-%m-%d %A')} ({nearest['days_to_expiry']} days)")
-            
-            # Verify it's monthly (should be last Thursday of month)
-            if nearest['expiry'].weekday() == 3:  # Thursday
-                logger.info(f"   ✅ Confirmed: MONTHLY futures (last Thursday)")
-            else:
-                logger.warning(f"   ⚠️ Warning: Not a Thursday expiry, might be weekly")
+            logger.info(f"   ✅ Confirmed: MONTHLY futures (Thursday expiry)")
             
             return True
         
