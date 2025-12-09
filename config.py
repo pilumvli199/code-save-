@@ -130,42 +130,59 @@ ATR_FALLBACK = 30
 
 def get_next_monthly_expiry():
     """
-    Get NEXT MONTH's last Thursday (monthly futures expiry)
-    NIFTY futures are MONTHLY contracts, not weekly!
+    Get NEAREST MONTHLY futures expiry (last Thursday of current or next month)
+    NIFTY futures are MONTHLY contracts expiring on last Thursday!
     """
     today = datetime.now()
     
-    # Get next month
-    if today.month == 12:
-        next_month = 1
-        year = today.year + 1
+    # Try current month first
+    current_month = today.month
+    current_year = today.year
+    
+    # Get last day of current month
+    if current_month == 12:
+        next_month_first = datetime(current_year + 1, 1, 1)
     else:
-        next_month = today.month + 1
-        year = today.year
+        next_month_first = datetime(current_year, current_month + 1, 1)
+    
+    last_day_current = (next_month_first - timedelta(days=1)).day
+    
+    # Find last Thursday of current month
+    current_month_expiry = None
+    for day in range(last_day_current, 0, -1):
+        date = datetime(current_year, current_month, day)
+        if date.weekday() == 3:  # Thursday = 3
+            current_month_expiry = date
+            break
+    
+    # If current month's expiry hasn't passed, use it
+    if current_month_expiry and current_month_expiry >= today:
+        return current_month_expiry.strftime('%Y-%m-%d')
+    
+    # Otherwise, get next month's last Thursday
+    if current_month == 12:
+        next_month = 1
+        year = current_year + 1
+    else:
+        next_month = current_month + 1
+        year = current_year
+    
+    # Get last day of next month
+    if next_month == 12:
+        following_month_first = datetime(year + 1, 1, 1)
+    else:
+        following_month_first = datetime(year, next_month + 1, 1)
+    
+    last_day_next = (following_month_first - timedelta(days=1)).day
     
     # Find last Thursday of next month
-    # Start from last day of next month and go backwards
-    if next_month == 12:
-        last_day = 31
-    elif next_month in [4, 6, 9, 11]:
-        last_day = 30
-    elif next_month == 2:
-        # Check leap year
-        if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0):
-            last_day = 29
-        else:
-            last_day = 28
-    else:
-        last_day = 31
-    
-    # Find last Thursday
-    for day in range(last_day, 0, -1):
+    for day in range(last_day_next, 0, -1):
         date = datetime(year, next_month, day)
         if date.weekday() == 3:  # Thursday = 3
             return date.strftime('%Y-%m-%d')
     
     # Fallback (should never happen)
-    return datetime(year, next_month, last_day).strftime('%Y-%m-%d')
+    return datetime(year, next_month, last_day_next).strftime('%Y-%m-%d')
 
 
 def get_next_weekly_expiry():
