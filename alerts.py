@@ -1,6 +1,6 @@
 """
 Alerts: Telegram Bot & Message Formatting
-UPDATED: Include VWAP score and OI strength in messages
+UPDATED: Include VWAP score, OI strength, deep analysis info
 """
 
 import logging
@@ -85,7 +85,7 @@ class MessageFormatter:
     
     @staticmethod
     def format_entry_signal(signal):
-        """Format entry signal alert with VWAP score"""
+        """Format entry signal alert with enhanced info"""
         emoji = "📈" if signal.signal_type.value == "CE_BUY" else "📉"
         expiry = " ⚡ <b>EXPIRY DAY</b>" if signal.is_expiry_day else ""
         
@@ -135,7 +135,7 @@ ATM {signal.atm_strike}:
   CE: {signal.atm_ce_change:+.1f}%
   PE: {signal.atm_pe_change:+.1f}%
 
-Volume: {signal.volume_ratio:.1f}x {'✅' if signal.volume_spike else ''}
+Volume: {signal.volume_ratio:.1f}x {'🔥' if signal.volume_spike else ''}
 Order Flow: {signal.order_flow:.2f}
 
 ━━━━━━━━━━━━━━━━━━━━
