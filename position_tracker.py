@@ -97,7 +97,7 @@ class PositionTracker:
         # Get current premium (estimated from futures movement + ATM data)
         current_premium = self._estimate_premium(current_data, signal)
         
-        # ✅ Update highest premium for trailing
+        # Update highest premium for trailing
         if current_premium > position.highest_premium:
             old_peak = position.highest_premium
             old_sl = position.trailing_sl
@@ -121,7 +121,7 @@ class PositionTracker:
         
         # ========== EXIT PRIORITY ORDER ==========
         
-        # ✅ EXIT 1: Stop Loss Hit (HIGHEST PRIORITY)
+        # EXIT 1: Stop Loss Hit (HIGHEST PRIORITY)
         if signal.signal_type == SignalType.CE_BUY:
             if current_data['futures_price'] <= signal.stop_loss:
                 return True, "Stop Loss Hit", f"Price: ₹{current_data['futures_price']:.2f} ≤ SL: ₹{signal.stop_loss:.2f}"
@@ -129,7 +129,7 @@ class PositionTracker:
             if current_data['futures_price'] >= signal.stop_loss:
                 return True, "Stop Loss Hit", f"Price: ₹{current_data['futures_price']:.2f} ≥ SL: ₹{signal.stop_loss:.2f}"
         
-        # ✅ EXIT 2: Target Hit
+        # EXIT 2: Target Hit
         if signal.signal_type == SignalType.CE_BUY:
             if current_data['futures_price'] >= signal.target_price:
                 return True, "Target Hit", f"Price: ₹{current_data['futures_price']:.2f} ≥ Target: ₹{signal.target_price:.2f}"
@@ -137,7 +137,7 @@ class PositionTracker:
             if current_data['futures_price'] <= signal.target_price:
                 return True, "Target Hit", f"Price: ₹{current_data['futures_price']:.2f} ≤ Target: ₹{signal.target_price:.2f}"
         
-        # ✅ EXIT 3: Time-based (Market close)
+        # EXIT 3: Time-based (Market close)
         current_time = datetime.now(IST).time()
         if current_time >= time(15, 15):
             return True, "Market Closing", "Exiting before market close"
@@ -146,10 +146,9 @@ class PositionTracker:
         
         if hold_time < MIN_HOLD_TIME_MINUTES:
             logger.debug(f"  ⏳ Hold time {hold_time:.1f}min < {MIN_HOLD_TIME_MINUTES}min - blocking early exits")
-            # Only allow SL/Target/Time exits (already checked above)
             return None
         
-        # ✅ EXIT 4: OI Reversal (SUSTAINED CHECK)
+        # EXIT 4: OI Reversal (SUSTAINED CHECK)
         if hold_time >= MIN_HOLD_BEFORE_OI_EXIT:
             # Track OI changes
             if signal.signal_type == SignalType.CE_BUY:
@@ -173,35 +172,32 @@ class PositionTracker:
             if is_reversal:
                 return True, "OI Reversal", f"{message} (Avg: {avg:.1f}%)"
         
-        # ✅ EXIT 5: Trailing SL Hit
+        # EXIT 5: Trailing SL Hit
         if ENABLE_TRAILING_SL and current_premium < position.trailing_sl:
             profit = current_premium - position.entry_premium
             profit_pct = (profit / position.entry_premium * 100) if position.entry_premium > 0 else 0
             return True, "Trailing SL Hit", f"Locked profit: ₹{profit:.2f} ({profit_pct:+.1f}%)"
         
-        # ✅ EXIT 6: Premium Drop from Peak
+        # EXIT 6: Premium Drop from Peak
         premium_drop_pct = ((position.highest_premium - current_premium) / 
                            position.highest_premium * 100) if position.highest_premium > 0 else 0
         
         if premium_drop_pct >= EXIT_PREMIUM_DROP_PERCENT:
             return True, "Premium Drop", f"Down {premium_drop_pct:.1f}% from peak ₹{position.highest_premium:.2f}"
         
-        # ✅ EXIT 7: Volume Dry (if significant time passed)
-        if hold_time >= 15:  # After 15 min
+        # EXIT 7: Volume Dry (if significant time passed)
+        if hold_time >= 15:
             volume_ratio = current_data.get('volume_ratio', 1.0)
             if volume_ratio < EXIT_VOLUME_DRY_THRESHOLD:
                 return True, "Volume Dried", f"Volume ratio: {volume_ratio:.1f}x"
         
-        # ✅ EXIT 8: Candle Rejection
+        # EXIT 8: Candle Rejection
         candle = current_data.get('candle_data', {})
         if candle.get('rejection'):
             rejection_type = candle.get('rejection_type')
             
-            # Bullish position + upper rejection = exit
             if signal.signal_type == SignalType.CE_BUY and rejection_type == 'upper':
                 return True, "Candle Rejection", "Long upper wick at resistance"
-            
-            # Bearish position + lower rejection = exit
             elif signal.signal_type == SignalType.PE_BUY and rejection_type == 'lower':
                 return True, "Candle Rejection", "Long lower wick at support"
         
@@ -262,7 +258,7 @@ class PositionTracker:
         
         # Adjust delta for direction
         if signal.signal_type == SignalType.PE_BUY:
-            spot_move = -spot_move  # Inverse for puts
+            spot_move = -spot_move
         
         premium_change = spot_move * delta
         estimated_premium = signal.option_premium + premium_change
