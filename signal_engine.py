@@ -91,7 +91,7 @@ class SignalGenerator:
                       gamma_zone, momentum, multi_tf, oi_strength='weak'):
         """Check CE_BUY setup with VWAP validation"""
         
-        # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
+        # STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
             "CE_BUY", futures_price, vwap, atr
         )
@@ -102,7 +102,7 @@ class SignalGenerator:
         
         logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
         
-        # ✅ STEP 2: Primary checks (STRICTER - both TF required)
+        # STEP 2: Primary checks (STRICTER - both TF required)
         primary_ce = ce_total_15m < -MIN_OI_15M_FOR_ENTRY and ce_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
         primary_atm = atm_ce_15m < -ATM_OI_THRESHOLD and has_15m_atm
         primary_vol = volume_spike
@@ -113,14 +113,14 @@ class SignalGenerator:
             logger.debug(f"  ❌ CE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
             return None
         
-        # ✅ STEP 3: Secondary checks
-        secondary_price = futures_price > vwap  # Above VWAP
+        # STEP 3: Secondary checks
+        secondary_price = futures_price > vwap
         secondary_green = candle_data.get('color') == 'GREEN'
         
-        # ✅ STEP 4: Bonus checks
+        # STEP 4: Bonus checks
         bonus_5m_strong = ce_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
-        bonus_vwap_above = vwap_distance > 0  # Price above VWAP
+        bonus_vwap_above = vwap_distance > 0
         bonus_pcr = pcr > PCR_BULLISH
         bonus_momentum = momentum.get('consecutive_green', 0) >= 2
         bonus_flow = order_flow < 1.0
@@ -129,7 +129,7 @@ class SignalGenerator:
         bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_above, bonus_pcr, 
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
-        # ✅ STEP 5: Calculate confidence (IMPROVED)
+        # STEP 5: Calculate confidence (IMPROVED)
         confidence = 40  # Base
         
         # Primary checks (60 points max)
@@ -142,7 +142,7 @@ class SignalGenerator:
         if primary_vol: confidence += 15
         
         # VWAP score (20 points max)
-        confidence += int(vwap_score / 5)  # Convert 0-100 to 0-20
+        confidence += int(vwap_score / 5)
         
         # Secondary checks (10 points)
         if secondary_green: confidence += 5
@@ -157,7 +157,7 @@ class SignalGenerator:
             logger.debug(f"  ❌ CE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
             return None
         
-        # ✅ STEP 6: Calculate levels
+        # STEP 6: Calculate levels
         sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
         entry = futures_price
         target = entry + int(atr * ATR_TARGET_MULTIPLIER)
@@ -215,7 +215,7 @@ class SignalGenerator:
                       gamma_zone, momentum, multi_tf, oi_strength='weak'):
         """Check PE_BUY setup with VWAP validation"""
         
-        # ✅ STEP 1: VWAP Validation (BLOCKING CHECK)
+        # STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
             "PE_BUY", futures_price, vwap, atr
         )
@@ -226,7 +226,7 @@ class SignalGenerator:
         
         logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
         
-        # ✅ STEP 2: Primary checks (STRICTER)
+        # STEP 2: Primary checks (STRICTER)
         primary_pe = pe_total_15m < -MIN_OI_15M_FOR_ENTRY and pe_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
         primary_atm = atm_pe_15m < -ATM_OI_THRESHOLD and has_15m_atm
         primary_vol = volume_spike
@@ -237,14 +237,14 @@ class SignalGenerator:
             logger.debug(f"  ❌ PE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
             return None
         
-        # ✅ STEP 3: Secondary checks
-        secondary_price = futures_price < vwap  # Below VWAP
+        # STEP 3: Secondary checks
+        secondary_price = futures_price < vwap
         secondary_red = candle_data.get('color') == 'RED'
         
-        # ✅ STEP 4: Bonus checks
+        # STEP 4: Bonus checks
         bonus_5m_strong = pe_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
-        bonus_vwap_below = vwap_distance < 0  # Price below VWAP
+        bonus_vwap_below = vwap_distance < 0
         bonus_pcr = pcr < PCR_BEARISH
         bonus_momentum = momentum.get('consecutive_red', 0) >= 2
         bonus_flow = order_flow > 1.5
@@ -253,7 +253,7 @@ class SignalGenerator:
         bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_below, bonus_pcr,
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
-        # ✅ STEP 5: Calculate confidence (IMPROVED)
+        # STEP 5: Calculate confidence (IMPROVED)
         confidence = 40  # Base
         
         # Primary checks (60 points max)
@@ -281,7 +281,7 @@ class SignalGenerator:
             logger.debug(f"  ❌ PE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
             return None
         
-        # ✅ STEP 6: Calculate levels
+        # STEP 6: Calculate levels
         sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
         entry = futures_price
         target = entry - int(atr * ATR_TARGET_MULTIPLIER)
@@ -339,7 +339,7 @@ class SignalValidator:
     def __init__(self):
         self.last_signal_time = None
         self.signal_count = 0
-        self.recent_signals = []  # Track last 10 signals
+        self.recent_signals = []
         self.last_exit_time = None
         self.last_exit_type = None
         self.last_exit_strike = None
@@ -349,38 +349,38 @@ class SignalValidator:
         if signal is None:
             return None
         
-        # ✅ Check 1: Basic cooldown
+        # Check 1: Basic cooldown
         if not self._check_cooldown():
             logger.info("⏸️ Signal in cooldown")
             return None
         
-        # ✅ Check 2: Duplicate signal (same direction + strike in 10 min)
+        # Check 2: Duplicate signal (same direction + strike in 10 min)
         if self._is_duplicate_signal(signal):
             logger.info("⚠️ Duplicate signal ignored (same direction+strike in last 10min)")
             return None
         
-        # ✅ Check 3: Same strike re-entry protection
+        # Check 3: Same strike re-entry protection
         if self._is_same_strike_too_soon(signal):
             logger.info(f"⚠️ Same strike {signal.atm_strike} re-entry blocked (need {SAME_STRIKE_COOLDOWN_MINUTES}min gap)")
             return None
         
-        # ✅ Check 4: Opposite signal after exit protection
+        # Check 4: Opposite signal after exit protection
         if self._is_opposite_too_soon(signal):
             logger.info(f"⚠️ Opposite signal too soon after exit (need {OPPOSITE_SIGNAL_COOLDOWN_MINUTES}min gap)")
             return None
         
-        # ✅ Check 5: R:R validation
+        # Check 5: R:R validation
         rr = signal.get_rr_ratio()
         if rr < 1.0:
             logger.warning(f"⚠️ Poor R:R: {rr:.2f}")
             return None
         
-        # ✅ Check 6: Confidence validation
+        # Check 6: Confidence validation
         if signal.confidence < MIN_CONFIDENCE:
             logger.warning(f"⚠️ Low confidence: {signal.confidence}%")
             return None
         
-        # ✅ Track signal
+        # Track signal
         self.recent_signals.append({
             'type': signal.signal_type,
             'strike': signal.atm_strike,
