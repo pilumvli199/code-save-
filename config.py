@@ -71,7 +71,7 @@ ATR_SL_GAMMA_MULTIPLIER = 2.0
 
 # VWAP Settings
 VWAP_BUFFER = 10               # Points buffer for VWAP distance
-VWAP_DISTANCE_MAX_ATR_MULTIPLE = 0.5  # Max 0.5x ATR distance
+VWAP_DISTANCE_MAX_ATR_MULTIPLE = 3.0  # Max 3.0x ATR distance (was 0.5x - TOO STRICT!)
 VWAP_STRICT_MODE = True        # Reject signals far from VWAP
 
 # Candle Settings
