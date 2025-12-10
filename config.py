@@ -128,67 +128,10 @@ ATR_FALLBACK = 30
 
 # ==================== HELPER FUNCTIONS ====================
 
-def get_next_monthly_expiry():
-    """
-    Get NEAREST MONTHLY futures expiry (last Thursday of current or next month)
-    NIFTY futures are MONTHLY contracts expiring on last Thursday!
-    """
-    today = datetime.now()
-    
-    # Try current month first
-    current_month = today.month
-    current_year = today.year
-    
-    # Get last day of current month
-    if current_month == 12:
-        next_month_first = datetime(current_year + 1, 1, 1)
-    else:
-        next_month_first = datetime(current_year, current_month + 1, 1)
-    
-    last_day_current = (next_month_first - timedelta(days=1)).day
-    
-    # Find last Thursday of current month
-    current_month_expiry = None
-    for day in range(last_day_current, 0, -1):
-        date = datetime(current_year, current_month, day)
-        if date.weekday() == 3:  # Thursday = 3
-            current_month_expiry = date
-            break
-    
-    # If current month's expiry hasn't passed, use it
-    if current_month_expiry and current_month_expiry >= today:
-        return current_month_expiry.strftime('%Y-%m-%d')
-    
-    # Otherwise, get next month's last Thursday
-    if current_month == 12:
-        next_month = 1
-        year = current_year + 1
-    else:
-        next_month = current_month + 1
-        year = current_year
-    
-    # Get last day of next month
-    if next_month == 12:
-        following_month_first = datetime(year + 1, 1, 1)
-    else:
-        following_month_first = datetime(year, next_month + 1, 1)
-    
-    last_day_next = (following_month_first - timedelta(days=1)).day
-    
-    # Find last Thursday of next month
-    for day in range(last_day_next, 0, -1):
-        date = datetime(year, next_month, day)
-        if date.weekday() == 3:  # Thursday = 3
-            return date.strftime('%Y-%m-%d')
-    
-    # Fallback (should never happen)
-    return datetime(year, next_month, last_day_next).strftime('%Y-%m-%d')
-
-
 def get_next_weekly_expiry():
     """
     Get next Tuesday (weekly options expiry)
-    Options are WEEKLY contracts!
+    Options are WEEKLY contracts - expires every Tuesday
     """
     today = datetime.now()
     days_ahead = 1 - today.weekday()  # Tuesday = 1
@@ -200,13 +143,12 @@ def get_next_weekly_expiry():
 
 def get_futures_contract_name():
     """
-    Generate NIFTY MONTHLY futures contract name
-    Example: NIFTY25JANFUT (expires 30 Jan 2025)
+    Generate display name for futures contract
+    NOTE: Actual detection happens automatically in data_manager.py
+    This is just for display purposes
     """
-    expiry = datetime.strptime(get_next_monthly_expiry(), '%Y-%m-%d')
-    year = expiry.strftime('%y')
-    month = expiry.strftime('%b').upper()
-    return f"NIFTY{year}{month}FUT"
+    # Placeholder - will be overwritten by auto-detection
+    return "NIFTY_FUTURES_AUTO"
 
 
 def calculate_atm_strike(spot_price):
