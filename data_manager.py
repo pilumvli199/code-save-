@@ -621,6 +621,16 @@ class DataFetcher:
             if not data:
                 return None
             
+            # DEBUG: Log response structure
+            logger.info(f"🔍 DEBUG: Response type: {type(data)}")
+            if isinstance(data, dict):
+                logger.info(f"🔍 DEBUG: Top-level keys: {list(data.keys())[:5]}")
+            elif isinstance(data, list):
+                logger.info(f"🔍 DEBUG: List length: {len(data)}")
+                if len(data) > 0:
+                    logger.info(f"🔍 DEBUG: First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'Not a dict'}")
+                    logger.info(f"🔍 DEBUG: First item sample: {str(data[0])[:200]}")
+            
             strike_data = {}
             
             # Parse response (handle both list and dict formats)
@@ -636,6 +646,12 @@ class DataFetcher:
                     
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
+                    
+                    # DEBUG: Log first strike structure
+                    if len(strike_data) == 0:
+                        logger.info(f"🔍 DEBUG: CE data keys: {list(ce_data.keys()) if ce_data else 'Empty'}")
+                        logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
+                        logger.info(f"🔍 DEBUG: CE sample: {str(ce_data)[:200]}")
                     
                     strike_data[strike] = {
                         'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
@@ -659,6 +675,11 @@ class DataFetcher:
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
                     
+                    # DEBUG: Log first strike structure
+                    if len(strike_data) == 0:
+                        logger.info(f"🔍 DEBUG: CE data keys: {list(ce_data.keys()) if ce_data else 'Empty'}")
+                        logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
+                    
                     strike_data[strike] = {
                         'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
                         'pe_oi': float(pe_data.get('open_interest') or pe_data.get('oi') or 0),
@@ -675,6 +696,7 @@ class DataFetcher:
             total_oi = sum(d['ce_oi'] + d['pe_oi'] for d in strike_data.values())
             if total_oi == 0:
                 logger.error("❌ ALL OI VALUES ARE ZERO!")
+                logger.error(f"🔍 DEBUG: Strike data sample: {list(strike_data.items())[:2]}")
                 return None
             
             logger.info(f"✅ Parsed {len(strike_data)} strikes (Total OI: {total_oi:,.0f})")
