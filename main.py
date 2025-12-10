@@ -54,10 +54,13 @@ class NiftyTradingBot:
         
         self.data_fetcher = DataFetcher(self.upstox)
         
-        # Get contract details
-        monthly_expiry = get_next_monthly_expiry()
+        # Get contract details from ACTUAL auto-detection
         weekly_expiry = get_next_weekly_expiry()
-        futures_contract = get_futures_contract_name()
+        
+        # Get actual detected futures info
+        monthly_expiry = self.upstox.futures_expiry.strftime('%Y-%m-%d') if self.upstox.futures_expiry else "AUTO"
+        futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
+        
         current_time = format_time_ist(get_ist_time())
         
         # Calculate deep analysis strikes for display
