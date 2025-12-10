@@ -653,13 +653,17 @@ class DataFetcher:
                         logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
                         logger.info(f"🔍 DEBUG: CE sample: {str(ce_data)[:200]}")
                     
+                    # Extract from nested market_data object
+                    ce_market = ce_data.get('market_data', {})
+                    pe_market = pe_data.get('market_data', {})
+                    
                     strike_data[strike] = {
-                        'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
-                        'pe_oi': float(pe_data.get('open_interest') or pe_data.get('oi') or 0),
-                        'ce_vol': float(ce_data.get('volume') or 0),
-                        'pe_vol': float(pe_data.get('volume') or 0),
-                        'ce_ltp': float(ce_data.get('last_price') or ce_data.get('ltp') or 0),
-                        'pe_ltp': float(pe_data.get('last_price') or pe_data.get('ltp') or 0)
+                        'ce_oi': float(ce_market.get('oi') or 0),
+                        'pe_oi': float(pe_market.get('oi') or 0),
+                        'ce_vol': float(ce_market.get('volume') or 0),
+                        'pe_vol': float(pe_market.get('volume') or 0),
+                        'ce_ltp': float(ce_market.get('ltp') or 0),
+                        'pe_ltp': float(pe_market.get('ltp') or 0)
                     }
             
             elif isinstance(data, dict):
@@ -680,13 +684,17 @@ class DataFetcher:
                         logger.info(f"🔍 DEBUG: CE data keys: {list(ce_data.keys()) if ce_data else 'Empty'}")
                         logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
                     
+                    # Extract from nested market_data object
+                    ce_market = ce_data.get('market_data', {})
+                    pe_market = pe_data.get('market_data', {})
+                    
                     strike_data[strike] = {
-                        'ce_oi': float(ce_data.get('open_interest') or ce_data.get('oi') or 0),
-                        'pe_oi': float(pe_data.get('open_interest') or pe_data.get('oi') or 0),
-                        'ce_vol': float(ce_data.get('volume') or 0),
-                        'pe_vol': float(pe_data.get('volume') or 0),
-                        'ce_ltp': float(ce_data.get('last_price') or ce_data.get('ltp') or 0),
-                        'pe_ltp': float(pe_data.get('last_price') or pe_data.get('ltp') or 0)
+                        'ce_oi': float(ce_market.get('oi') or 0),
+                        'pe_oi': float(pe_market.get('oi') or 0),
+                        'ce_vol': float(ce_market.get('volume') or 0),
+                        'pe_vol': float(pe_market.get('volume') or 0),
+                        'ce_ltp': float(ce_market.get('ltp') or 0),
+                        'pe_ltp': float(pe_market.get('ltp') or 0)
                     }
             
             if not strike_data:
