@@ -133,9 +133,11 @@ class UpstoxClient:
                 logger.error("❌ NIFTY spot not found")
                 return False
             
-            # Find MONTHLY futures (last Thursday, not weekly)
+            # Find MONTHLY futures (SMART DETECTION - based on days to expiry)
+            # Logic: Monthly futures have 20-35 days to expiry typically
+            #        Weekly futures have 0-7 days to expiry
             now = datetime.now(IST)
-            futures_list = []
+            all_futures = []
             
             for instrument in instruments:
                 if instrument.get('segment') != 'NSE_FO':
@@ -152,36 +154,51 @@ class UpstoxClient:
                 try:
                     expiry_dt = datetime.fromtimestamp(expiry_ms / 1000, tz=IST)
                     
-                    # Only consider futures that:
-                    # 1. Expire AFTER today
-                    # 2. Expire on THURSDAY (monthly futures)
-                    if expiry_dt > now and expiry_dt.weekday() == 3:
-                        futures_list.append({
+                    # Only consider futures that expire AFTER today
+                    if expiry_dt > now:
+                        days_to_expiry = (expiry_dt - now).days
+                        all_futures.append({
                             'key': instrument.get('instrument_key'),
                             'expiry': expiry_dt,
                             'symbol': instrument.get('trading_symbol', ''),
-                            'days_to_expiry': (expiry_dt - now).days
+                            'days_to_expiry': days_to_expiry,
+                            'weekday': expiry_dt.strftime('%A')
                         })
                 except:
                     continue
             
-            if not futures_list:
-                logger.error("❌ No MONTHLY futures found (Thursday expiry)")
+            if not all_futures:
+                logger.error("❌ No futures contracts found")
                 return False
             
-            # Sort by expiry date - get NEAREST monthly futures
-            futures_list.sort(key=lambda x: x['expiry'])
+            # Sort by expiry date
+            all_futures.sort(key=lambda x: x['expiry'])
             
-            # Get nearest MONTHLY (Thursday) futures
-            nearest = futures_list[0]
+            # SMART SELECTION LOGIC:
+            # 1. If nearest futures has > 10 days → It's MONTHLY (use it)
+            # 2. If nearest futures has < 10 days → It's WEEKLY (skip to next)
+            # 3. This handles holidays automatically!
             
-            self.futures_key = nearest['key']
-            self.futures_expiry = nearest['expiry']
-            self.futures_symbol = nearest['symbol']
+            monthly_futures = None
             
-            logger.info(f"✅ Futures: {nearest['symbol']}")
-            logger.info(f"   Expiry: {nearest['expiry'].strftime('%Y-%m-%d %A')} ({nearest['days_to_expiry']} days)")
-            logger.info(f"   ✅ Confirmed: MONTHLY futures (Thursday expiry)")
+            for fut in all_futures:
+                if fut['days_to_expiry'] > 10:
+                    # This is a MONTHLY contract (far expiry)
+                    monthly_futures = fut
+                    break
+            
+            # Fallback: If no contract > 10 days, use nearest (emergency case)
+            if not monthly_futures:
+                monthly_futures = all_futures[0]
+                logger.warning(f"⚠️ Using nearest futures (no contract > 10 days found)")
+            
+            self.futures_key = monthly_futures['key']
+            self.futures_expiry = monthly_futures['expiry']
+            self.futures_symbol = monthly_futures['symbol']
+            
+            logger.info(f"✅ Futures (MONTHLY): {monthly_futures['symbol']}")
+            logger.info(f"   Expiry: {monthly_futures['expiry'].strftime('%Y-%m-%d %A')} ({monthly_futures['days_to_expiry']} days)")
+            logger.info(f"   Type: {'MONTHLY' if monthly_futures['days_to_expiry'] > 10 else 'WEEKLY (fallback)'}")
             
             return True
         
