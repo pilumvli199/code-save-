@@ -1,6 +1,6 @@
 """
 Market Analyzers: OI, Volume, Technical, Market Structure
-UPGRADED: Price-aware OI analysis, 4 scenarios detection, strength classification
+FIXED: VWAP validation strengthened for PE_BUY
 """
 
 import pandas as pd
@@ -312,50 +312,6 @@ class OIAnalyzer:
         })
     
     @staticmethod
-    def get_atm_oi_changes(strike_data, atm_strike, previous_strike_data=None):
-        """Get ATM OI changes"""
-        current = strike_data.get(atm_strike, {
-            'ce_oi': 0, 'pe_oi': 0,
-            'ce_vol': 0, 'pe_vol': 0,
-            'ce_ltp': 0, 'pe_ltp': 0
-        })
-        
-        ce_change_pct = 0.0
-        pe_change_pct = 0.0
-        
-        if previous_strike_data:
-            previous = previous_strike_data.get(atm_strike, {'ce_oi': 0, 'pe_oi': 0})
-            
-            prev_ce_oi = previous.get('ce_oi', 0)
-            curr_ce_oi = current.get('ce_oi', 0)
-            
-            if prev_ce_oi > 0:
-                ce_change_pct = ((curr_ce_oi - prev_ce_oi) / prev_ce_oi) * 100
-            elif curr_ce_oi > 0:
-                ce_change_pct = 100.0
-            
-            prev_pe_oi = previous.get('pe_oi', 0)
-            curr_pe_oi = current.get('pe_oi', 0)
-            
-            if prev_pe_oi > 0:
-                pe_change_pct = ((curr_pe_oi - prev_pe_oi) / prev_pe_oi) * 100
-            elif curr_pe_oi > 0:
-                pe_change_pct = 100.0
-        
-        return {
-            'ce_oi': current.get('ce_oi', 0),
-            'pe_oi': current.get('pe_oi', 0),
-            'ce_vol': current.get('ce_vol', 0),
-            'pe_vol': current.get('pe_vol', 0),
-            'ce_ltp': current.get('ce_ltp', 0),
-            'pe_ltp': current.get('pe_ltp', 0),
-            'ce_change_pct': round(ce_change_pct, 1),
-            'pe_change_pct': round(pe_change_pct, 1),
-            'has_previous_data': previous_strike_data is not None,
-            'atm_strike': atm_strike
-        }
-    
-    @staticmethod
     def check_oi_reversal(signal_type, oi_changes_history, threshold=EXIT_OI_REVERSAL_THRESHOLD):
         """Check OI reversal with sustained building"""
         if not oi_changes_history or len(oi_changes_history) < EXIT_OI_CONFIRMATION_CANDLES:
@@ -416,7 +372,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def analyze_volume_trend(df, periods=5):
-        """Analyze volume trend"""
+        """🔧 FIX: Analyze volume trend with better validation"""
         if df is None or len(df) < periods + 1:
             return {
                 'trend': 'unknown',
@@ -425,19 +381,33 @@ class VolumeAnalyzer:
                 'ratio': 1.0
             }
         
-        recent = df['volume'].tail(periods + 1)
-        avg = recent.iloc[:-1].mean()
-        current = recent.iloc[-1]
-        ratio = current / avg if avg > 0 else 1.0
-        
-        trend = 'increasing' if ratio > 1.3 else 'decreasing' if ratio < 0.7 else 'stable'
-        
-        return {
-            'trend': trend,
-            'avg_volume': round(avg, 2),
-            'current_volume': round(current, 2),
-            'ratio': round(ratio, 2)
-        }
+        try:
+            recent = df['volume'].tail(periods + 1)
+            avg = recent.iloc[:-1].mean()
+            current = recent.iloc[-1]
+            
+            # Avoid divide by zero
+            if avg == 0:
+                ratio = 1.0
+            else:
+                ratio = current / avg
+            
+            trend = 'increasing' if ratio > 1.3 else 'decreasing' if ratio < 0.7 else 'stable'
+            
+            return {
+                'trend': trend,
+                'avg_volume': round(float(avg), 2),
+                'current_volume': round(float(current), 2),
+                'ratio': round(float(ratio), 2)
+            }
+        except Exception as e:
+            logger.error(f"❌ Volume trend error: {e}")
+            return {
+                'trend': 'unknown',
+                'avg_volume': 0,
+                'current_volume': 0,
+                'ratio': 1.0
+            }
 
 
 # ==================== Technical Analyzer ====================
@@ -471,7 +441,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def validate_signal_with_vwap(signal_type, spot, vwap, atr):
-        """Validate signal with VWAP"""
+        """🔧 FIX #2: STRENGTHENED VWAP validation for PE_BUY"""
         if not vwap or not spot or not atr:
             return False, "Missing VWAP/Price data", 0
         
@@ -483,6 +453,7 @@ class TechnicalAnalyzer:
             buffer = VWAP_BUFFER
         
         if signal_type == "CE_BUY":
+            # CE_BUY: Price should be NEAR or ABOVE VWAP
             if distance < -buffer:
                 return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             elif distance > buffer * 3:
@@ -495,11 +466,18 @@ class TechnicalAnalyzer:
                 return True, f"VWAP OK: {distance:+.0f} pts", int(score)
         
         elif signal_type == "PE_BUY":
+            # 🔧 FIX: PE_BUY MUST be BELOW VWAP (bearish)
+            # If price is ABOVE VWAP, it's NOT bearish!
+            if distance > 0:
+                return False, f"⚠️ Price ABOVE VWAP (+{distance:.0f} pts) - NOT BEARISH!", 0
+            
+            # Price is below VWAP (correct bearish position)
             if distance > buffer:
                 return False, f"Price {distance:.0f} pts above VWAP", 0
             elif distance < -buffer * 3:
                 return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             else:
+                # Score higher when price is clearly below VWAP
                 if distance < 0:
                     score = min(100, 80 + (abs(distance) / buffer * 20))
                 else:
