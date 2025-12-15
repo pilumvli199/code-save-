@@ -337,8 +337,9 @@ class NiftyTradingBot:
         
         # 🔍 VOLUME DEBUG
         logger.info(f"\n🔍 VOLUME DEBUG:")
-        logger.info(f"  DataFrame shape: {futures_df.shape}")
-        logger.info(f"  Recent volumes: {futures_df['volume'].tail(6).tolist()}")
+        logger.info(f"  Total candles: {len(futures_df)}")
+        logger.info(f"  Last 7 volumes: {futures_df['volume'].tail(7).tolist()}")
+        logger.info(f"  Completed (skip last): {futures_df['volume'].tail(7)[:-1].tolist()}")
         logger.info(f"  Avg volume: {vol_trend['avg_volume']}")
         logger.info(f"  Current volume: {vol_trend['current_volume']}")
         logger.info(f"  Calculated ratio: {vol_trend['ratio']}")
