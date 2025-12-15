@@ -1,6 +1,6 @@
 """
-Data Manager: Upstox API + Redis Memory
-FIXED: Monthly futures auto-detection, LIVE price fetching, 11 strikes fetch
+Data Manager: Upstox API + Redis Memory + PRICE TRACKING
+UPGRADED: Price history tracking, price change calculation, comparison logic
 """
 
 import asyncio
@@ -90,6 +90,8 @@ class UpstoxClient:
                 return None
             
             except Exception as e:
+            logger.error(f"❌ Option chain error: {e}", exc_info=True)
+            return None
                 logger.error(f"❌ Request failed (attempt {attempt + 1}/3): {e}")
                 if attempt < 2:
                     await asyncio.sleep(2)
@@ -133,9 +135,7 @@ class UpstoxClient:
                 logger.error("❌ NIFTY spot not found")
                 return False
             
-            # Find MONTHLY futures (SMART DETECTION - based on days to expiry)
-            # Logic: Monthly futures have 20-35 days to expiry typically
-            #        Weekly futures have 0-7 days to expiry
+            # Find MONTHLY futures
             now = datetime.now(IST)
             all_futures = []
             
@@ -154,7 +154,6 @@ class UpstoxClient:
                 try:
                     expiry_dt = datetime.fromtimestamp(expiry_ms / 1000, tz=IST)
                     
-                    # Only consider futures that expire AFTER today
                     if expiry_dt > now:
                         days_to_expiry = (expiry_dt - now).days
                         all_futures.append({
@@ -171,26 +170,20 @@ class UpstoxClient:
                 logger.error("❌ No futures contracts found")
                 return False
             
-            # Sort by expiry date
+            # Sort by expiry
             all_futures.sort(key=lambda x: x['expiry'])
             
-            # SMART SELECTION LOGIC:
-            # 1. If nearest futures has > 10 days → It's MONTHLY (use it)
-            # 2. If nearest futures has < 10 days → It's WEEKLY (skip to next)
-            # 3. This handles holidays automatically!
-            
+            # Select MONTHLY (> 10 days)
             monthly_futures = None
             
             for fut in all_futures:
                 if fut['days_to_expiry'] > 10:
-                    # This is a MONTHLY contract (far expiry)
                     monthly_futures = fut
                     break
             
-            # Fallback: If no contract > 10 days, use nearest (emergency case)
             if not monthly_futures:
                 monthly_futures = all_futures[0]
-                logger.warning(f"⚠️ Using nearest futures (no contract > 10 days found)")
+                logger.warning(f"⚠️ Using nearest futures")
             
             self.futures_key = monthly_futures['key']
             self.futures_expiry = monthly_futures['expiry']
@@ -198,7 +191,6 @@ class UpstoxClient:
             
             logger.info(f"✅ Futures (MONTHLY): {monthly_futures['symbol']}")
             logger.info(f"   Expiry: {monthly_futures['expiry'].strftime('%Y-%m-%d %A')} ({monthly_futures['days_to_expiry']} days)")
-            logger.info(f"   Type: {'MONTHLY' if monthly_futures['days_to_expiry'] > 10 else 'WEEKLY (fallback)'}")
             
             return True
         
@@ -240,7 +232,7 @@ class UpstoxClient:
         return None
     
     async def get_candles(self, instrument_key, interval='1minute'):
-        """Get historical candles (for technical analysis only)"""
+        """Get historical candles"""
         if not instrument_key:
             return None
         
@@ -277,7 +269,7 @@ class UpstoxClient:
 
 # ==================== Redis Brain ====================
 class RedisBrain:
-    """Memory manager with 24 hour TTL"""
+    """Memory manager with 24h TTL + PRICE TRACKING"""
     
     def __init__(self):
         self.client = None
@@ -286,6 +278,11 @@ class RedisBrain:
         self.snapshot_count = 0
         self.first_snapshot_time = None
         self.premarket_loaded = False
+        
+        # 🆕 PRICE TRACKING
+        self.price_history = []  # [(timestamp, price), ...]
+        self.last_price = None
+        self.first_price = None
         
         if REDIS_AVAILABLE and REDIS_URL:
             try:
@@ -298,6 +295,131 @@ class RedisBrain:
         else:
             logger.info(f"💾 RAM mode (TTL: {MEMORY_TTL_HOURS}h)")
     
+    def save_price(self, price):
+        """🆕 Save price snapshot with timestamp"""
+        now = datetime.now(IST).replace(second=0, microsecond=0)
+        
+        # Store in history
+        self.price_history.append((now, price))
+        
+        # Keep only last 24 hours
+        cutoff = now - timedelta(hours=24)
+        self.price_history = [(t, p) for t, p in self.price_history if t > cutoff]
+        
+        # Update trackers
+        self.last_price = price
+        if self.first_price is None:
+            self.first_price = price
+            logger.info(f"📍 FIRST PRICE: ₹{price:.2f}")
+        
+        # Save to Redis/RAM
+        key = f"nifty:price:{now.strftime('%Y%m%d_%H%M')}"
+        value = json.dumps({'price': price, 'timestamp': now.isoformat()})
+        
+        if self.client:
+            try:
+                self.client.setex(key, MEMORY_TTL_SECONDS, value)
+            except:
+                self.memory[key] = value
+                self.memory_timestamps[key] = time_module.time()
+        else:
+            self.memory[key] = value
+            self.memory_timestamps[key] = time_module.time()
+    
+    def get_price_change(self, minutes_ago=5):
+        """🆕 Get price change % from N minutes ago"""
+        if not self.last_price:
+            return 0.0, False
+        
+        target = datetime.now(IST) - timedelta(minutes=minutes_ago)
+        target = target.replace(second=0, microsecond=0)
+        
+        # Try Redis/RAM first
+        key = f"nifty:price:{target.strftime('%Y%m%d_%H%M')}"
+        
+        past_str = None
+        if self.client:
+            try:
+                past_str = self.client.get(key)
+            except:
+                pass
+        
+        if not past_str:
+            past_str = self.memory.get(key)
+        
+        # Try tolerance ±2 minutes
+        if not past_str:
+            for offset in [-1, 1, -2, 2]:
+                alt = target + timedelta(minutes=offset)
+                alt_key = f"nifty:price:{alt.strftime('%Y%m%d_%H%M')}"
+                
+                if self.client:
+                    try:
+                        past_str = self.client.get(alt_key)
+                        if past_str:
+                            break
+                    except:
+                        pass
+                
+                if not past_str:
+                    past_str = self.memory.get(alt_key)
+                    if past_str:
+                        break
+        
+        # Fallback: Search history directly
+        if not past_str and self.price_history:
+            closest = None
+            min_diff = float('inf')
+            
+            for t, p in self.price_history:
+                diff = abs((t - target).total_seconds())
+                if diff < min_diff:
+                    min_diff = diff
+                    closest = p
+            
+            if closest and min_diff <= 180:  # Within 3 minutes
+                past_price = closest
+                change_pct = ((self.last_price - past_price) / past_price) * 100
+                return round(change_pct, 2), True
+        
+        if not past_str:
+            return 0.0, False
+        
+        try:
+            past = json.loads(past_str)
+            past_price = past.get('price', 0)
+            
+            if past_price == 0:
+                return 0.0, False
+            
+            change_pct = ((self.last_price - past_price) / past_price) * 100
+            return round(change_pct, 2), True
+        
+        except Exception as e:
+            logger.error(f"❌ Price parse error: {e}")
+            return 0.0, False
+    
+    def get_price_stats(self):
+        """🆕 Get price statistics"""
+        if not self.last_price:
+            return {
+                'current': 0,
+                'first': 0,
+                'change_from_open': 0.0,
+                'history_count': 0
+            }
+        
+        change_from_open = 0.0
+        if self.first_price:
+            change_from_open = ((self.last_price - self.first_price) / self.first_price) * 100
+        
+        return {
+            'current': self.last_price,
+            'first': self.first_price,
+            'change_from_open': round(change_from_open, 2),
+            'history_count': len(self.price_history)
+        }
+    
     def save_total_oi(self, ce, pe):
         """Save total OI snapshot"""
         now = datetime.now(IST).replace(second=0, microsecond=0)
@@ -306,7 +428,7 @@ class RedisBrain:
         
         if self.snapshot_count == 0:
             self.first_snapshot_time = now
-            logger.info(f"📍 FIRST SNAPSHOT at {now.strftime('%H:%M')} - BASE REFERENCE")
+            logger.info(f"📍 FIRST SNAPSHOT at {now.strftime('%H:%M')}")
         
         if self.client:
             try:
@@ -321,7 +443,7 @@ class RedisBrain:
         self.snapshot_count += 1
         
         if self.snapshot_count == 1:
-            logger.info(f"💾 First snapshot saved: CE={ce:,.0f}, PE={pe:,.0f}")
+            logger.info(f"💾 First snapshot: CE={ce:,.0f}, PE={pe:,.0f}")
         
         self._cleanup()
     
@@ -522,7 +644,7 @@ class RedisBrain:
         """Skip previous day data"""
         if self.premarket_loaded:
             return
-        logger.info("📚 Skipping previous day data (fresh start at 9:16)")
+        logger.info("📚 Skipping previous day data")
         self.premarket_loaded = True
 
 
@@ -534,7 +656,7 @@ class DataFetcher:
         self.client = client
     
     async def fetch_spot(self):
-        """Fetch spot price (for ATM calculation)"""
+        """Fetch spot price"""
         try:
             if not self.client.spot_key:
                 logger.error("❌ Spot key missing")
@@ -557,7 +679,7 @@ class DataFetcher:
             return None
     
     async def fetch_futures_candles(self):
-        """Fetch MONTHLY futures candles (for VWAP/ATR/technical analysis)"""
+        """Fetch MONTHLY futures candles"""
         try:
             if not self.client.futures_key:
                 return None
@@ -581,7 +703,7 @@ class DataFetcher:
             return None
     
     async def fetch_futures_ltp(self):
-        """Fetch MONTHLY futures LIVE price (for entry/exit decisions)"""
+        """Fetch MONTHLY futures LIVE price"""
         try:
             if not self.client.futures_key:
                 logger.error("❌ Futures key missing")
@@ -595,7 +717,7 @@ class DataFetcher:
             
             ltp = data.get('last_price')
             if not ltp:
-                logger.error(f"❌ No 'last_price' in futures quote. Keys: {list(data.keys())}")
+                logger.error(f"❌ No 'last_price'. Keys: {list(data.keys())}")
                 return None
             
             return float(ltp)
@@ -605,7 +727,7 @@ class DataFetcher:
             return None
     
     async def fetch_option_chain(self, spot_price):
-        """Fetch WEEKLY option chain - 11 strikes (ATM ± 5)"""
+        """Fetch WEEKLY option chain - 11 strikes"""
         try:
             if not self.client.index_key:
                 return None
@@ -614,26 +736,16 @@ class DataFetcher:
             atm = calculate_atm_strike(spot_price)
             min_strike, max_strike = get_strike_range_fetch(atm)
             
-            logger.info(f"📡 Fetching option chain: Expiry={expiry}, ATM={atm}, Range={min_strike}-{max_strike}")
+            logger.info(f"📡 Fetching: Expiry={expiry}, ATM={atm}, Range={min_strike}-{max_strike}")
             
             data = await self.client.get_option_chain(self.client.index_key, expiry)
             
             if not data:
                 return None
             
-            # DEBUG: Log response structure
-            logger.info(f"🔍 DEBUG: Response type: {type(data)}")
-            if isinstance(data, dict):
-                logger.info(f"🔍 DEBUG: Top-level keys: {list(data.keys())[:5]}")
-            elif isinstance(data, list):
-                logger.info(f"🔍 DEBUG: List length: {len(data)}")
-                if len(data) > 0:
-                    logger.info(f"🔍 DEBUG: First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'Not a dict'}")
-                    logger.info(f"🔍 DEBUG: First item sample: {str(data[0])[:200]}")
-            
             strike_data = {}
             
-            # Parse response (handle both list and dict formats)
+            # Parse response
             if isinstance(data, list):
                 for item in data:
                     strike = item.get('strike_price') or item.get('strike')
@@ -647,13 +759,6 @@ class DataFetcher:
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
                     
-                    # DEBUG: Log first strike structure
-                    if len(strike_data) == 0:
-                        logger.info(f"🔍 DEBUG: CE data keys: {list(ce_data.keys()) if ce_data else 'Empty'}")
-                        logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
-                        logger.info(f"🔍 DEBUG: CE sample: {str(ce_data)[:200]}")
-                    
-                    # Extract from nested market_data object
                     ce_market = ce_data.get('market_data', {})
                     pe_market = pe_data.get('market_data', {})
                     
@@ -679,12 +784,6 @@ class DataFetcher:
                     ce_data = item.get('call_options', {}) or item.get('CE', {})
                     pe_data = item.get('put_options', {}) or item.get('PE', {})
                     
-                    # DEBUG: Log first strike structure
-                    if len(strike_data) == 0:
-                        logger.info(f"🔍 DEBUG: CE data keys: {list(ce_data.keys()) if ce_data else 'Empty'}")
-                        logger.info(f"🔍 DEBUG: PE data keys: {list(pe_data.keys()) if pe_data else 'Empty'}")
-                    
-                    # Extract from nested market_data object
                     ce_market = ce_data.get('market_data', {})
                     pe_market = pe_data.get('market_data', {})
                     
@@ -704,7 +803,6 @@ class DataFetcher:
             total_oi = sum(d['ce_oi'] + d['pe_oi'] for d in strike_data.values())
             if total_oi == 0:
                 logger.error("❌ ALL OI VALUES ARE ZERO!")
-                logger.error(f"🔍 DEBUG: Strike data sample: {list(strike_data.items())[:2]}")
                 return None
             
             logger.info(f"✅ Parsed {len(strike_data)} strikes (Total OI: {total_oi:,.0f})")
@@ -712,5 +810,3 @@ class DataFetcher:
             return atm, strike_data
         
         except Exception as e:
-            logger.error(f"❌ Option chain error: {e}", exc_info=True)
-            return None
