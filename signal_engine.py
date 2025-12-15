@@ -1,6 +1,6 @@
 """
 Signal Engine: Entry Signal Generation & Validation
-FIXED: VWAP validation, better confidence, re-entry protection
+FIXED: VWAP validation, better confidence, re-entry protection, oi_scenario support
 """
 
 from dataclasses import dataclass
@@ -52,6 +52,7 @@ class Signal:
     trailing_sl_enabled: bool
     is_expiry_day: bool
     analysis_details: dict
+    oi_scenario_type: Optional[str] = None  # 🆕 NEW FIELD
     
     def get_direction(self):
         return "BULLISH" if self.signal_type == SignalType.CE_BUY else "BEARISH"
@@ -64,7 +65,7 @@ class Signal:
 
 # ==================== Signal Generator ====================
 class SignalGenerator:
-    """Generate entry signals with FIXED logic"""
+    """Generate entry signals with FIXED logic + OI scenario support"""
     
     def __init__(self):
         self.last_signal_time = None
@@ -88,8 +89,8 @@ class SignalGenerator:
                       atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
-                      gamma_zone, momentum, multi_tf, oi_strength='weak'):
-        """Check CE_BUY setup with VWAP validation"""
+                      gamma_zone, momentum, multi_tf, oi_strength='weak', oi_scenario=None, **kwargs):
+        """Check CE_BUY setup with VWAP validation + OI scenario"""
         
         # STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
@@ -101,6 +102,26 @@ class SignalGenerator:
             return None
         
         logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        
+        # 🆕 STEP 1.5: Check OI scenario
+        oi_scenario_boost = 0
+        oi_scenario_type = None
+        
+        if oi_scenario:
+            primary_direction = oi_scenario.get('primary_direction', 'NEUTRAL')
+            ce_signal = oi_scenario.get('ce_signal', 'NEUTRAL')
+            ce_scenario = oi_scenario.get('ce_scenario')
+            
+            # STRONG BULLISH scenarios get boost
+            if 'BULLISH' in primary_direction or 'BULLISH' in ce_signal:
+                if 'STRONG' in ce_signal:
+                    oi_scenario_boost = 15  # Fresh buying
+                    oi_scenario_type = f"{ce_scenario} (STRONG)"
+                else:
+                    oi_scenario_boost = 5   # Weak/covering
+                    oi_scenario_type = f"{ce_scenario} (WEAK)"
+                
+                logger.debug(f"  🔥 OI Scenario: {oi_scenario_type} (+{oi_scenario_boost}%)")
         
         # STEP 2: Primary checks (STRICTER - both TF required)
         primary_ce = ce_total_15m < -MIN_OI_15M_FOR_ENTRY and ce_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
@@ -143,6 +164,9 @@ class SignalGenerator:
         
         # VWAP score (20 points max)
         confidence += int(vwap_score / 5)
+        
+        # 🆕 OI Scenario boost
+        confidence += oi_scenario_boost
         
         # Secondary checks (10 points)
         if secondary_green: confidence += 5
@@ -194,10 +218,12 @@ class SignalGenerator:
             bonus_checks=bonus_passed,
             trailing_sl_enabled=ENABLE_TRAILING_SL,
             is_expiry_day=gamma_zone,
+            oi_scenario_type=oi_scenario_type,  # 🆕 Store scenario
             analysis_details={
                 'primary': {'ce_unwinding': primary_ce, 'atm_unwinding': primary_atm, 'volume': primary_vol},
                 'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed
+                'bonus_count': bonus_passed,
+                'oi_scenario_boost': oi_scenario_boost  # 🆕
             }
         )
         
@@ -212,8 +238,8 @@ class SignalGenerator:
                       atm_ce_5m, atm_pe_5m, atm_ce_15m, atm_pe_15m,
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
-                      gamma_zone, momentum, multi_tf, oi_strength='weak'):
-        """Check PE_BUY setup with VWAP validation"""
+                      gamma_zone, momentum, multi_tf, oi_strength='weak', oi_scenario=None, **kwargs):
+        """Check PE_BUY setup with VWAP validation + OI scenario"""
         
         # STEP 1: VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
@@ -225,6 +251,26 @@ class SignalGenerator:
             return None
         
         logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        
+        # 🆕 STEP 1.5: Check OI scenario
+        oi_scenario_boost = 0
+        oi_scenario_type = None
+        
+        if oi_scenario:
+            primary_direction = oi_scenario.get('primary_direction', 'NEUTRAL')
+            pe_signal = oi_scenario.get('pe_signal', 'NEUTRAL')
+            pe_scenario = oi_scenario.get('pe_scenario')
+            
+            # STRONG BEARISH scenarios get boost
+            if 'BEARISH' in primary_direction or 'BEARISH' in pe_signal:
+                if 'STRONG' in pe_signal:
+                    oi_scenario_boost = 15  # Fresh selling
+                    oi_scenario_type = f"{pe_scenario} (STRONG)"
+                else:
+                    oi_scenario_boost = 5   # Weak/covering
+                    oi_scenario_type = f"{pe_scenario} (WEAK)"
+                
+                logger.debug(f"  🔥 OI Scenario: {oi_scenario_type} (+{oi_scenario_boost}%)")
         
         # STEP 2: Primary checks (STRICTER)
         primary_pe = pe_total_15m < -MIN_OI_15M_FOR_ENTRY and pe_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
@@ -267,6 +313,9 @@ class SignalGenerator:
         
         # VWAP score (20 points max)
         confidence += int(vwap_score / 5)
+        
+        # 🆕 OI Scenario boost
+        confidence += oi_scenario_boost
         
         # Secondary checks (10 points)
         if secondary_red: confidence += 5
@@ -318,10 +367,12 @@ class SignalGenerator:
             bonus_checks=bonus_passed,
             trailing_sl_enabled=ENABLE_TRAILING_SL,
             is_expiry_day=gamma_zone,
+            oi_scenario_type=oi_scenario_type,  # 🆕 Store scenario
             analysis_details={
                 'primary': {'pe_unwinding': primary_pe, 'atm_unwinding': primary_atm, 'volume': primary_vol},
                 'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed
+                'bonus_count': bonus_passed,
+                'oi_scenario_boost': oi_scenario_boost  # 🆕
             }
         )
         
