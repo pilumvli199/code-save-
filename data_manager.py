@@ -529,7 +529,12 @@ class RedisBrain:
             self.memory_timestamps[key] = time_module.time()
     
     def get_strike_oi_change(self, strike, current_data, minutes_ago=15):
-        """Get strike OI change"""
+        """
+        🔧 FIX: Get strike OI change with extended tolerance
+        
+        Problem: First 5-10 minutes data not found due to narrow ±2min tolerance
+        Solution: Increased tolerance to ±5 minutes + debug logging
+        """
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         key = f"nifty:strike:{strike}:{target.strftime('%Y%m%d_%H%M')}"
@@ -544,8 +549,10 @@ class RedisBrain:
         if not past_str:
             past_str = self.memory.get(key)
         
+        # 🔧 FIX: Increased tolerance ±2 → ±5 minutes
         if not past_str:
-            for offset in [-1, 1, -2, 2]:
+            found_key = None
+            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
                 alt = target + timedelta(minutes=offset)
                 alt_key = f"nifty:strike:{strike}:{alt.strftime('%Y%m%d_%H%M')}"
                 
@@ -553,6 +560,7 @@ class RedisBrain:
                     try:
                         past_str = self.client.get(alt_key)
                         if past_str:
+                            found_key = alt_key
                             break
                     except:
                         pass
@@ -560,9 +568,16 @@ class RedisBrain:
                 if not past_str:
                     past_str = self.memory.get(alt_key)
                     if past_str:
+                        found_key = alt_key
                         break
+            
+            # 🔧 DEBUG: Log if found with tolerance
+            if found_key:
+                logger.debug(f"✅ ATM {strike}: Found with offset key: {found_key}")
         
         if not past_str:
+            # 🔧 DEBUG: Log missing data
+            logger.debug(f"⏳ ATM {strike}: No {minutes_ago}m data yet (warmup)")
             return 0.0, 0.0, False
         
         try:
@@ -586,7 +601,7 @@ class RedisBrain:
             return round(ce_chg, 1), round(pe_chg, 1), True
         
         except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
+            logger.error(f"❌ ATM {strike} parse error: {e}")
             return 0.0, 0.0, False
     
     def is_warmed_up(self, minutes=15):
