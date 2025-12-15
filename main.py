@@ -334,6 +334,15 @@ class NiftyTradingBot:
         momentum = self.technical_analyzer.detect_momentum(futures_df)
         
         vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df)
+        
+        # 🔍 VOLUME DEBUG
+        logger.info(f"\n🔍 VOLUME DEBUG:")
+        logger.info(f"  DataFrame shape: {futures_df.shape}")
+        logger.info(f"  Recent volumes: {futures_df['volume'].tail(6).tolist()}")
+        logger.info(f"  Avg volume: {vol_trend['avg_volume']}")
+        logger.info(f"  Current volume: {vol_trend['current_volume']}")
+        logger.info(f"  Calculated ratio: {vol_trend['ratio']}")
+        
         vol_spike, vol_ratio = self.volume_analyzer.detect_volume_spike(
             vol_trend['current_volume'], vol_trend['avg_volume']
         )
