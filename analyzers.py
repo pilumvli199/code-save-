@@ -371,8 +371,8 @@ class VolumeAnalyzer:
         return round(max(0.2, min(ratio, 5.0)), 2)
     
     @staticmethod
-    def analyze_volume_trend(df, periods=5):
-        """🔧 FIX: Analyze volume trend with better validation"""
+    def analyze_volume_trend(df, periods=10):
+        """🔧 FIX: Analyze volume trend with 10-bar average for stability"""
         if df is None or len(df) < periods + 1:
             return {
                 'trend': 'unknown',
