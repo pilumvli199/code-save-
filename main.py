@@ -333,13 +333,13 @@ class NiftyTradingBot:
         candle = self.technical_analyzer.analyze_candle(futures_df)
         momentum = self.technical_analyzer.detect_momentum(futures_df)
         
-        vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df)
+        vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df, futures_ltp=futures_ltp)
         
         # 🔍 VOLUME DEBUG
         logger.info(f"\n🔍 VOLUME DEBUG:")
         logger.info(f"  Total candles: {len(futures_df)}")
         logger.info(f"  Last 7 volumes: {futures_df['volume'].tail(7).tolist()}")
-        logger.info(f"  Completed (skip last): {futures_df['volume'].tail(7)[:-1].tolist()}")
+        logger.info(f"  Skipped stale: {vol_trend.get('skipped_candles', 1)} candles")
         logger.info(f"  Avg volume: {vol_trend['avg_volume']}")
         logger.info(f"  Current volume: {vol_trend['current_volume']}")
         logger.info(f"  Calculated ratio: {vol_trend['ratio']}")
