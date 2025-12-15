@@ -1,6 +1,6 @@
 """
 Market Analyzers: OI, Volume, Technical, Market Structure
-FIXED: 5 strikes deep analysis, AND logic for unwinding, VWAP validation
+UPGRADED: Price-aware OI analysis, 4 scenarios detection, strength classification
 """
 
 import pandas as pd
@@ -13,7 +13,7 @@ logger = setup_logger("analyzers")
 
 # ==================== OI Analyzer ====================
 class OIAnalyzer:
-    """Open Interest analysis with 5 strikes deep focus"""
+    """Open Interest analysis WITH PRICE CONTEXT"""
     
     @staticmethod
     def calculate_total_oi(strike_data):
@@ -28,10 +28,7 @@ class OIAnalyzer:
     
     @staticmethod
     def calculate_deep_analysis_oi(strike_data, atm_strike):
-        """
-        Calculate CE/PE OI for DEEP ANALYSIS strikes only (5 strikes)
-        ATM ± 2 = 5 strikes where 90% institutional money flows
-        """
+        """Calculate CE/PE OI for DEEP ANALYSIS strikes only (5 strikes)"""
         deep_strikes = get_deep_analysis_strikes(atm_strike)
         
         deep_ce = 0
@@ -49,23 +46,236 @@ class OIAnalyzer:
         """Calculate Put-Call Ratio with neutral default"""
         if total_ce == 0:
             if total_pe == 0:
-                return 1.0  # Neutral (both zero)
+                return 1.0
             else:
-                return 10.0  # Very high PCR (cap)
+                return 10.0
         
         pcr = total_pe / total_ce
-        return round(min(pcr, 10.0), 2)  # Cap at 10.0
+        return round(min(pcr, 10.0), 2)
+    
+    @staticmethod
+    def analyze_oi_with_price(ce_5m, ce_15m, pe_5m, pe_15m, price_change_pct):
+        """
+        🔥 COMPLETE OI Analysis with PRICE direction
+        
+        Detects 6 scenarios:
+        1. CE Long Buildup (STRONG BULLISH)
+        2. CE Short Covering (WEAK BULLISH)
+        3. CE Long Unwinding (WEAK BEARISH)
+        4. PE Short Buildup (STRONG BEARISH)
+        5. PE Short Covering (WEAK BEARISH)
+        6. PE Long Unwinding (WEAK BULLISH)
+        """
+        
+        # Thresholds
+        OI_BUILDUP_THRESHOLD = 3.0
+        OI_UNWINDING_THRESHOLD = -5.0
+        STRONG_BUILDUP = 7.0
+        STRONG_UNWINDING = -8.0
+        PRICE_UP = 0.15
+        PRICE_DOWN = -0.15
+        
+        result = {
+            'ce_scenario': None,
+            'pe_scenario': None,
+            'ce_signal': 'NEUTRAL',
+            'pe_signal': 'NEUTRAL',
+            'ce_strength': 'none',
+            'pe_strength': 'none',
+            'primary_direction': 'NEUTRAL',
+            'confidence_boost': 0,
+            'details': {}
+        }
+        
+        # ━━━━━━━━━━━━ CE ANALYSIS ━━━━━━━━━━━━
+        
+        # Scenario 1: CE LONG BUILDUP
+        if (ce_5m > OI_BUILDUP_THRESHOLD and 
+            ce_15m > OI_BUILDUP_THRESHOLD and 
+            price_change_pct > PRICE_UP):
+            
+            if ce_15m > STRONG_BUILDUP and ce_5m > STRONG_BUILDUP:
+                strength = 'strong'
+                confidence = 95
+            elif ce_15m > OI_BUILDUP_THRESHOLD * 1.5:
+                strength = 'medium'
+                confidence = 85
+            else:
+                strength = 'weak'
+                confidence = 75
+            
+            result['ce_scenario'] = 'LONG_BUILDUP'
+            result['ce_signal'] = 'STRONG_BULLISH'
+            result['ce_strength'] = strength
+            result['confidence_boost'] = confidence - 70
+            result['details']['ce'] = {
+                'type': 'Fresh Call Buying',
+                'meaning': 'Bulls entering aggressively',
+                'oi_5m': ce_5m,
+                'oi_15m': ce_15m,
+                'price_move': price_change_pct,
+                'action': 'BUY_CALL_HIGH_CONFIDENCE'
+            }
+        
+        # Scenario 2: CE SHORT COVERING
+        elif (ce_5m < OI_UNWINDING_THRESHOLD and 
+              ce_15m < OI_UNWINDING_THRESHOLD and 
+              price_change_pct > PRICE_UP):
+            
+            if ce_15m < STRONG_UNWINDING:
+                strength = 'medium'
+                confidence = 65
+            else:
+                strength = 'weak'
+                confidence = 55
+            
+            result['ce_scenario'] = 'SHORT_COVERING'
+            result['ce_signal'] = 'WEAK_BULLISH'
+            result['ce_strength'] = strength
+            result['confidence_boost'] = -10
+            result['details']['ce'] = {
+                'type': 'Call Unwinding (Short Covering)',
+                'meaning': 'Bears exiting, NOT fresh buying',
+                'oi_5m': ce_5m,
+                'oi_15m': ce_15m,
+                'price_move': price_change_pct,
+                'action': 'WAIT_OR_SKIP',
+                'warning': '⚠️ Temporary bounce, not sustainable'
+            }
+        
+        # Scenario 3: CE LONG UNWINDING
+        elif (ce_5m < OI_UNWINDING_THRESHOLD and 
+              ce_15m < OI_UNWINDING_THRESHOLD and 
+              price_change_pct < PRICE_DOWN):
+            
+            if ce_15m < STRONG_UNWINDING:
+                strength = 'medium'
+                confidence = 70
+            else:
+                strength = 'weak'
+                confidence = 60
+            
+            result['ce_scenario'] = 'LONG_UNWINDING'
+            result['ce_signal'] = 'WEAK_BEARISH'
+            result['ce_strength'] = strength
+            result['details']['ce'] = {
+                'type': 'Call Unwinding (Long Exit)',
+                'meaning': 'Bulls booking profit',
+                'oi_5m': ce_5m,
+                'oi_15m': ce_15m,
+                'price_move': price_change_pct,
+                'action': 'AVOID_CALL',
+                'warning': '⚠️ Profit booking'
+            }
+        
+        # ━━━━━━━━━━━━ PE ANALYSIS ━━━━━━━━━━━━
+        
+        # Scenario 4: PE SHORT BUILDUP
+        if (pe_5m > OI_BUILDUP_THRESHOLD and 
+            pe_15m > OI_BUILDUP_THRESHOLD and 
+            price_change_pct < PRICE_DOWN):
+            
+            if pe_15m > STRONG_BUILDUP and pe_5m > STRONG_BUILDUP:
+                strength = 'strong'
+                confidence = 95
+            elif pe_15m > OI_BUILDUP_THRESHOLD * 1.5:
+                strength = 'medium'
+                confidence = 85
+            else:
+                strength = 'weak'
+                confidence = 75
+            
+            result['pe_scenario'] = 'SHORT_BUILDUP'
+            result['pe_signal'] = 'STRONG_BEARISH'
+            result['pe_strength'] = strength
+            result['confidence_boost'] = max(result['confidence_boost'], confidence - 70)
+            result['details']['pe'] = {
+                'type': 'Fresh Put Buying',
+                'meaning': 'Bears entering aggressively',
+                'oi_5m': pe_5m,
+                'oi_15m': pe_15m,
+                'price_move': price_change_pct,
+                'action': 'BUY_PUT_HIGH_CONFIDENCE'
+            }
+        
+        # Scenario 5: PE SHORT COVERING
+        elif (pe_5m < OI_UNWINDING_THRESHOLD and 
+              pe_15m < OI_UNWINDING_THRESHOLD and 
+              price_change_pct < PRICE_DOWN):
+            
+            if pe_15m < STRONG_UNWINDING:
+                strength = 'medium'
+                confidence = 65
+            else:
+                strength = 'weak'
+                confidence = 55
+            
+            result['pe_scenario'] = 'SHORT_COVERING'
+            result['pe_signal'] = 'WEAK_BEARISH'
+            result['pe_strength'] = strength
+            result['confidence_boost'] = min(result['confidence_boost'], -10)
+            result['details']['pe'] = {
+                'type': 'Put Unwinding (Short Covering)',
+                'meaning': 'Bulls exiting puts',
+                'oi_5m': pe_5m,
+                'oi_15m': pe_15m,
+                'price_move': price_change_pct,
+                'action': 'WAIT_OR_SKIP',
+                'warning': '⚠️ Temporary dip'
+            }
+        
+        # Scenario 6: PE LONG UNWINDING
+        elif (pe_5m < OI_UNWINDING_THRESHOLD and 
+              pe_15m < OI_UNWINDING_THRESHOLD and 
+              price_change_pct > PRICE_UP):
+            
+            if pe_15m < STRONG_UNWINDING:
+                strength = 'medium'
+                confidence = 70
+            else:
+                strength = 'weak'
+                confidence = 60
+            
+            result['pe_scenario'] = 'LONG_UNWINDING'
+            result['pe_signal'] = 'WEAK_BULLISH'
+            result['pe_strength'] = strength
+            result['details']['pe'] = {
+                'type': 'Put Unwinding (Long Exit)',
+                'meaning': 'Bears booking profit',
+                'oi_5m': pe_5m,
+                'oi_15m': pe_15m,
+                'price_move': price_change_pct,
+                'action': 'AVOID_PUT',
+                'warning': '⚠️ Bear profit booking'
+            }
+        
+        # Determine Primary Direction
+        ce_bullish = result['ce_signal'] in ['STRONG_BULLISH', 'WEAK_BULLISH']
+        pe_bullish = result['pe_signal'] in ['STRONG_BULLISH', 'WEAK_BULLISH']
+        ce_bearish = result['ce_signal'] in ['STRONG_BEARISH', 'WEAK_BEARISH']
+        pe_bearish = result['pe_signal'] in ['STRONG_BEARISH', 'WEAK_BEARISH']
+        
+        # Confluence check
+        if ce_bullish and pe_bullish:
+            result['primary_direction'] = 'STRONG_BULLISH'
+            result['confidence_boost'] += 15
+        elif ce_bearish and pe_bearish:
+            result['primary_direction'] = 'STRONG_BEARISH'
+            result['confidence_boost'] += 15
+        elif 'STRONG_BULLISH' in [result['ce_signal'], result['pe_signal']]:
+            result['primary_direction'] = 'BULLISH'
+        elif 'STRONG_BEARISH' in [result['ce_signal'], result['pe_signal']]:
+            result['primary_direction'] = 'BEARISH'
+        else:
+            result['primary_direction'] = 'NEUTRAL'
+        
+        return result
     
     @staticmethod
     def detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m):
-        """
-        Detect CE/PE unwinding - AND LOGIC (both timeframes required)
-        This ensures quality signals, not just noise
-        """
-        # CE unwinding - BOTH 5m AND 15m must show unwinding
+        """LEGACY - kept for backward compatibility"""
         ce_unwinding = (ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY)
         
-        # Strength based on 15m (primary timeframe)
         if ce_15m < -STRONG_OI_15M_THRESHOLD and ce_5m < -STRONG_OI_5M_THRESHOLD:
             ce_strength = 'strong'
         elif ce_15m < -MIN_OI_15M_FOR_ENTRY and ce_5m < -MIN_OI_5M_FOR_ENTRY:
@@ -73,10 +283,8 @@ class OIAnalyzer:
         else:
             ce_strength = 'weak'
         
-        # PE unwinding - BOTH 5m AND 15m must show unwinding
         pe_unwinding = (pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY)
         
-        # Strength
         if pe_15m < -STRONG_OI_15M_THRESHOLD and pe_5m < -STRONG_OI_5M_THRESHOLD:
             pe_strength = 'strong'
         elif pe_15m < -MIN_OI_15M_FOR_ENTRY and pe_5m < -MIN_OI_5M_FOR_ENTRY:
@@ -84,7 +292,6 @@ class OIAnalyzer:
         else:
             pe_strength = 'weak'
         
-        # Multi-timeframe confirmation (both showing negative)
         multi_tf = (ce_5m < -2.0 and ce_15m < -3.0) or (pe_5m < -2.0 and pe_15m < -3.0)
         
         return {
@@ -97,57 +304,41 @@ class OIAnalyzer:
     
     @staticmethod
     def get_atm_data(strike_data, atm_strike):
-        """Get ATM strike data (current values only)"""
+        """Get ATM strike data"""
         return strike_data.get(atm_strike, {
-            'ce_oi': 0,
-            'pe_oi': 0,
-            'ce_vol': 0,
-            'pe_vol': 0,
-            'ce_ltp': 0,
-            'pe_ltp': 0
+            'ce_oi': 0, 'pe_oi': 0,
+            'ce_vol': 0, 'pe_vol': 0,
+            'ce_ltp': 0, 'pe_ltp': 0
         })
     
     @staticmethod
     def get_atm_oi_changes(strike_data, atm_strike, previous_strike_data=None):
-        """
-        Get ATM strike data WITH OI change calculations
-        Compares current vs previous scan
-        """
+        """Get ATM OI changes"""
         current = strike_data.get(atm_strike, {
-            'ce_oi': 0,
-            'pe_oi': 0,
-            'ce_vol': 0,
-            'pe_vol': 0,
-            'ce_ltp': 0,
-            'pe_ltp': 0
+            'ce_oi': 0, 'pe_oi': 0,
+            'ce_vol': 0, 'pe_vol': 0,
+            'ce_ltp': 0, 'pe_ltp': 0
         })
         
         ce_change_pct = 0.0
         pe_change_pct = 0.0
         
         if previous_strike_data:
-            previous = previous_strike_data.get(atm_strike, {
-                'ce_oi': 0,
-                'pe_oi': 0
-            })
+            previous = previous_strike_data.get(atm_strike, {'ce_oi': 0, 'pe_oi': 0})
             
-            # CE OI change
             prev_ce_oi = previous.get('ce_oi', 0)
             curr_ce_oi = current.get('ce_oi', 0)
             
             if prev_ce_oi > 0:
-                ce_diff = curr_ce_oi - prev_ce_oi
-                ce_change_pct = (ce_diff / prev_ce_oi) * 100
+                ce_change_pct = ((curr_ce_oi - prev_ce_oi) / prev_ce_oi) * 100
             elif curr_ce_oi > 0:
                 ce_change_pct = 100.0
             
-            # PE OI change
             prev_pe_oi = previous.get('pe_oi', 0)
             curr_pe_oi = current.get('pe_oi', 0)
             
             if prev_pe_oi > 0:
-                pe_diff = curr_pe_oi - prev_pe_oi
-                pe_change_pct = (pe_diff / prev_pe_oi) * 100
+                pe_change_pct = ((curr_pe_oi - prev_pe_oi) / prev_pe_oi) * 100
             elif curr_pe_oi > 0:
                 pe_change_pct = 100.0
         
@@ -166,32 +357,24 @@ class OIAnalyzer:
     
     @staticmethod
     def check_oi_reversal(signal_type, oi_changes_history, threshold=EXIT_OI_REVERSAL_THRESHOLD):
-        """
-        Check OI reversal with SUSTAINED building (not single candle spike)
-        Requires EXIT_OI_CONFIRMATION_CANDLES consecutive candles
-        """
+        """Check OI reversal with sustained building"""
         if not oi_changes_history or len(oi_changes_history) < EXIT_OI_CONFIRMATION_CANDLES:
             return False, 'none', 0.0, "Insufficient data"
         
-        # Get last N candles
         recent = oi_changes_history[-EXIT_OI_CONFIRMATION_CANDLES:]
         current = recent[-1]
         
-        # Count sustained building
         building_count = sum(1 for oi in recent if oi > threshold)
         
-        # Strong reversal: ALL recent candles building
         if building_count >= EXIT_OI_CONFIRMATION_CANDLES:
             avg_building = sum(recent) / len(recent)
             strength = 'strong' if avg_building > 5.0 else 'medium'
-            return True, strength, avg_building, f"{signal_type} sustained building: {building_count}/{len(recent)} candles"
+            return True, strength, avg_building, f"{signal_type} sustained building"
         
-        # Very strong single spike (exception)
         if current > EXIT_OI_SPIKE_THRESHOLD:
             return True, 'spike', current, f"{signal_type} spike: {current:.1f}%"
         
-        # Not confirmed
-        return False, 'none', current, f"{signal_type} OI change: {current:.1f}% (not sustained)"
+        return False, 'none', current, f"{signal_type} OI: {current:.1f}% (not sustained)"
 
 
 # ==================== Volume Analyzer ====================
@@ -200,7 +383,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def calculate_total_volume(strike_data):
-        """Calculate total CE/PE volume (uses ALL 11 strikes)"""
+        """Calculate total CE/PE volume"""
         if not strike_data:
             return 0, 0
         
@@ -218,7 +401,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def calculate_order_flow(strike_data):
-        """Calculate order flow ratio (CE vol / PE vol)"""
+        """Calculate order flow ratio"""
         ce_vol, pe_vol = VolumeAnalyzer.calculate_total_volume(strike_data)
         
         if ce_vol == 0 and pe_vol == 0:
@@ -233,7 +416,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def analyze_volume_trend(df, periods=5):
-        """Analyze volume trend from futures candles"""
+        """Analyze volume trend"""
         if df is None or len(df) < periods + 1:
             return {
                 'trend': 'unknown',
@@ -259,11 +442,11 @@ class VolumeAnalyzer:
 
 # ==================== Technical Analyzer ====================
 class TechnicalAnalyzer:
-    """Technical indicators: VWAP, ATR, Candles"""
+    """Technical indicators"""
     
     @staticmethod
     def calculate_vwap(df):
-        """Calculate VWAP from futures candles"""
+        """Calculate VWAP"""
         if df is None or len(df) == 0:
             return None
         
@@ -288,54 +471,46 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def validate_signal_with_vwap(signal_type, spot, vwap, atr):
-        """
-        Validate if signal should be taken based on VWAP distance
-        BLOCKING CHECK - rejects signals too far from fair value
-        """
+        """Validate signal with VWAP"""
         if not vwap or not spot or not atr:
             return False, "Missing VWAP/Price data", 0
         
         distance = spot - vwap
         
-        # Calculate buffer
         if VWAP_STRICT_MODE:
             buffer = atr * VWAP_DISTANCE_MAX_ATR_MULTIPLE
         else:
             buffer = VWAP_BUFFER
         
         if signal_type == "CE_BUY":
-            # CE buy: Price should be near or above VWAP
             if distance < -buffer:
-                return False, f"Price {abs(distance):.0f} pts below VWAP (too far)", 0
+                return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             elif distance > buffer * 3:
-                return False, f"Price {distance:.0f} pts above VWAP (overextended)", 0
+                return False, f"Price {distance:.0f} pts above VWAP", 0
             else:
-                # Score based on proximity
                 if distance > 0:
                     score = min(100, 80 + (distance / buffer * 20))
                 else:
                     score = max(60, 80 - (abs(distance) / buffer * 20))
-                return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
+                return True, f"VWAP OK: {distance:+.0f} pts", int(score)
         
         elif signal_type == "PE_BUY":
-            # PE buy: Price should be near or below VWAP
             if distance > buffer:
-                return False, f"Price {distance:.0f} pts above VWAP (too far)", 0
+                return False, f"Price {distance:.0f} pts above VWAP", 0
             elif distance < -buffer * 3:
-                return False, f"Price {abs(distance):.0f} pts below VWAP (overextended)", 0
+                return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             else:
-                # Score based on proximity
                 if distance < 0:
                     score = min(100, 80 + (abs(distance) / buffer * 20))
                 else:
                     score = max(60, 80 - (distance / buffer * 20))
-                return True, f"VWAP distance OK: {distance:+.0f} pts", int(score)
+                return True, f"VWAP OK: {distance:+.0f} pts", int(score)
         
         return False, "Unknown signal type", 0
     
     @staticmethod
     def calculate_atr(df, period=ATR_PERIOD):
-        """Calculate ATR from futures candles"""
+        """Calculate ATR"""
         if df is None or len(df) < period:
             return ATR_FALLBACK
         
@@ -386,10 +561,7 @@ class TechnicalAnalyzer:
                 'lower_wick': round(lower_wick, 2),
                 'rejection': rejection,
                 'rejection_type': rejection_type,
-                'open': o,
-                'high': h,
-                'low': l,
-                'close': c
+                'open': o, 'high': h, 'low': l, 'close': c
             }
         except Exception as e:
             logger.error(f"❌ Candle error: {e}")
@@ -423,17 +595,10 @@ class TechnicalAnalyzer:
     @staticmethod
     def _empty_candle():
         return {
-            'color': 'UNKNOWN',
-            'size': 0,
-            'body_size': 0,
-            'upper_wick': 0,
-            'lower_wick': 0,
-            'rejection': False,
-            'rejection_type': None,
-            'open': 0,
-            'high': 0,
-            'low': 0,
-            'close': 0
+            'color': 'UNKNOWN', 'size': 0, 'body_size': 0,
+            'upper_wick': 0, 'lower_wick': 0,
+            'rejection': False, 'rejection_type': None,
+            'open': 0, 'high': 0, 'low': 0, 'close': 0
         }
 
 
@@ -443,7 +608,7 @@ class MarketAnalyzer:
     
     @staticmethod
     def calculate_max_pain(strike_data, spot_price):
-        """Calculate max pain strike (uses all 11 strikes)"""
+        """Calculate max pain strike"""
         if not strike_data:
             return 0, 0.0
         
@@ -474,7 +639,7 @@ class MarketAnalyzer:
     
     @staticmethod
     def detect_gamma_zone():
-        """Check if expiry day (weekly options)"""
+        """Check if expiry day"""
         try:
             from config import get_next_weekly_expiry
             today = datetime.now(IST).date()
