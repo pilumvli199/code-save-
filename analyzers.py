@@ -58,6 +58,9 @@ class OIAnalyzer:
         """
         🔥 COMPLETE OI Analysis with PRICE direction
         
+        🔧 FIX: Reduced price thresholds from 0.15% → 0.05%
+        Reason: Market often flat, missing strong OI signals with strict thresholds
+        
         Detects 6 scenarios:
         1. CE Long Buildup (STRONG BULLISH)
         2. CE Short Covering (WEAK BULLISH)
@@ -67,13 +70,13 @@ class OIAnalyzer:
         6. PE Long Unwinding (WEAK BULLISH)
         """
         
-        # Thresholds
+        # 🔧 FIX: Lower thresholds for flat markets
         OI_BUILDUP_THRESHOLD = 3.0
         OI_UNWINDING_THRESHOLD = -5.0
         STRONG_BUILDUP = 7.0
         STRONG_UNWINDING = -8.0
-        PRICE_UP = 0.15
-        PRICE_DOWN = -0.15
+        PRICE_UP = 0.05       # 🔧 CHANGED: 0.15 → 0.05 (more sensitive)
+        PRICE_DOWN = -0.05    # 🔧 CHANGED: -0.15 → -0.05
         
         result = {
             'ce_scenario': None,
@@ -371,9 +374,14 @@ class VolumeAnalyzer:
         return round(max(0.2, min(ratio, 5.0)), 2)
     
     @staticmethod
-    def analyze_volume_trend(df, periods=10):
-        """🔧 FIX: Analyze volume trend with 10-bar average for stability"""
-        if df is None or len(df) < periods + 1:
+    def analyze_volume_trend(df, periods=15):
+        """
+        🔧 FIX: Volume trend analysis - SKIP incomplete last candle
+        
+        Problem: Upstox returns incomplete current candle with stale volume
+        Solution: Use df[:-1] to skip last bar, take 15-bar average for stability
+        """
+        if df is None or len(df) < periods + 2:
             return {
                 'trend': 'unknown',
                 'avg_volume': 0,
@@ -382,12 +390,24 @@ class VolumeAnalyzer:
             }
         
         try:
-            recent = df['volume'].tail(periods + 1)
+            # 🔧 KEY FIX: Skip last incomplete candle
+            completed_candles = df[:-1]  # Remove last (incomplete) candle
+            
+            if len(completed_candles) < periods + 1:
+                return {
+                    'trend': 'unknown',
+                    'avg_volume': 0,
+                    'current_volume': 0,
+                    'ratio': 1.0
+                }
+            
+            # Use last complete candle as "current"
+            recent = completed_candles['volume'].tail(periods + 1)
             avg = recent.iloc[:-1].mean()
             current = recent.iloc[-1]
             
             # Avoid divide by zero
-            if avg == 0:
+            if avg == 0 or avg < 100:  # Sanity check
                 ratio = 1.0
             else:
                 ratio = current / avg
