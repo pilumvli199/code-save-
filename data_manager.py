@@ -90,8 +90,6 @@ class UpstoxClient:
                 return None
             
             except Exception as e:
-            logger.error(f"❌ Option chain error: {e}", exc_info=True)
-            return None
                 logger.error(f"❌ Request failed (attempt {attempt + 1}/3): {e}")
                 if attempt < 2:
                     await asyncio.sleep(2)
@@ -254,17 +252,22 @@ class UpstoxClient:
         encoded = quote(instrument_key, safe='')
         url = f"{UPSTOX_OPTION_CHAIN_URL}?instrument_key={encoded}&expiry_date={expiry_date}"
         
-        data = await self._request(url)
+        try:
+            data = await self._request(url)
+            
+            if not data:
+                logger.error("❌ Option chain API returned None")
+                return None
+            
+            if 'data' not in data:
+                logger.error(f"❌ No 'data' key. Keys: {list(data.keys())}")
+                return None
+            
+            return data['data']
         
-        if not data:
-            logger.error("❌ Option chain API returned None")
+        except Exception as e:
+            logger.error(f"❌ Option chain error: {e}", exc_info=True)
             return None
-        
-        if 'data' not in data:
-            logger.error(f"❌ No 'data' key. Keys: {list(data.keys())}")
-            return None
-        
-        return data['data']
 
 
 # ==================== Redis Brain ====================
@@ -810,3 +813,5 @@ class DataFetcher:
             return atm, strike_data
         
         except Exception as e:
+            logger.error(f"❌ Option chain fetch error: {e}", exc_info=True)
+            return None
