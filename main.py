@@ -1,72 +1,50 @@
 """
-NIFTY Trading Bot V3 - Yellow Flash Edition ⚡
-Complete with S/R levels and Price Action patterns
+NIFTY Trading Bot - Main Orchestrator
+FIXED: ATM OI bug, VWAP validation, volume calculation
 """
 
 import asyncio
-from datetime import datetime, time
+from datetime import datetime
 
 from config import *
 from utils import *
 from data_manager import UpstoxClient, RedisBrain, DataFetcher
-from analyzers import (
-    OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, 
-    MarketAnalyzer, SRAnalyzer, PriceActionAnalyzer
-)
+from analyzers import OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, MarketAnalyzer
 from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
-BOT_VERSION = "4.3.0-V3-YELLOW-FLASH"
+BOT_VERSION = "5.1.0-FIXED"
 
 logger = setup_logger("main")
 
 
 class NiftyTradingBot:
-    """Main bot orchestrator - V3 Yellow Flash Edition"""
+    """Main bot orchestrator - FIXED EDITION"""
     
     def __init__(self):
         self.memory = RedisBrain()
         self.upstox = None
         self.data_fetcher = None
         
-        # Core analyzers
         self.oi_analyzer = OIAnalyzer()
         self.volume_analyzer = VolumeAnalyzer()
         self.technical_analyzer = TechnicalAnalyzer()
         self.market_analyzer = MarketAnalyzer()
         
-        # 🆕 V3: New analyzers
-        self.sr_analyzer = SRAnalyzer()
-        self.price_action_analyzer = PriceActionAnalyzer()
-        
-        # Signal and position
         self.signal_gen = SignalGenerator()
         self.signal_validator = SignalValidator()
         self.position_tracker = PositionTracker()
         
-        # Alerts
         self.telegram = TelegramBot()
         self.formatter = MessageFormatter()
         
-        # State tracking
-        self.previous_strike_data = None
         self.exit_triggered_this_cycle = False
-        self.previous_atm = None
-        
-        # 🆕 V3: S/R levels cache
-        self.daily_sr = None
-        self.m15_sr = None
-        self.m5_sr = None
-        self.last_daily_update = None
-        self.last_m15_update = None
-        self.last_m5_update = None
     
     async def initialize(self):
-        """Initialize bot with V3 startup"""
+        """Initialize bot with startup notification"""
         logger.info("=" * 60)
         logger.info(f"🚀 NIFTY Trading Bot v{BOT_VERSION}")
-        logger.info("⚡ Yellow Flash Edition - Lightning Fast!")
         logger.info("=" * 60)
         
         self.upstox = UpstoxClient()
@@ -80,23 +58,39 @@ class NiftyTradingBot:
         
         current_time = format_time_ist(get_ist_time())
         
+        example_atm = 24150
+        deep_strikes = get_deep_analysis_strikes(example_atm)
+        deep_range = f"{deep_strikes[0]}-{deep_strikes[-1]}"
+        
+        fetch_min, fetch_max = get_strike_range_fetch(example_atm)
+        
         startup_msg = f"""
-🚀 <b>NIFTY BOT v{BOT_VERSION} STARTED</b>
+🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
 ━━━━━━━━━━━━━━━━━━━━
-🔥 <b>V3 YELLOW FLASH FEATURES</b>
+🔧 <b>BUG FIXES IN THIS VERSION</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Simplified Indicators:</b>
-✅ EMA-9 (Fast trend)
-✅ VWAP (Institution level)
-✅ ATR (SL/Target sizing)
+✅ ATM OI 0.0% bug FIXED
+✅ VWAP validation strengthened
+✅ Volume calculation improved
+✅ PE_BUY direction validation
 
-<b>New Powers:</b>
-✅ S/R Levels (Multi-timeframe)
-✅ Price Action (Rejection, Engulfing, Retest)
-✅ Confluence Detection
-✅ Smart Price Location Filter
+━━━━━━━━━━━━━━━━━━━━
+🆕 <b>PRICE-AWARE OI ANALYSIS</b>
+━━━━━━━━━━━━━━━━━━━━
+
+<b>6 OI Scenarios Detected:</b>
+
+<b>STRONG Signals (Fresh Money):</b>
+1️⃣ CE Long Buildup (OI↑ + Price↑)
+2️⃣ PE Short Buildup (OI↑ + Price↓)
+
+<b>WEAK Signals (Profit Booking):</b>
+3️⃣ CE Short Covering (OI↓ + Price↑)
+4️⃣ CE Long Unwinding (OI↓ + Price↓)
+5️⃣ PE Short Covering (OI↓ + Price↓)
+6️⃣ PE Long Unwinding (OI↓ + Price↑)
 
 ━━━━━━━━━━━━━━━━━━━━
 📅 <b>CONTRACT DETAILS</b>
@@ -110,87 +104,93 @@ class NiftyTradingBot:
 • Expiry: {weekly_expiry}
 
 ━━━━━━━━━━━━━━━━━━━━
-📊 <b>V3 STRATEGY</b>
+📊 <b>DATA STRATEGY</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Signal Generation:</b>
-1. OI unwinding (institutions)
-2. Volume spike (momentum)
-3. At S/R level (zones)
-4. Price action confirmed (patterns)
-5. EMA-9 aligned (trend)
+<b>MONTHLY Futures:</b>
+✅ Candles for VWAP/ATR/EMA
+✅ LIVE price for decisions
+✅ Price history tracking
 
-<b>Result:</b>
-Win Rate: 78-85%+ 🔥
-R:R: 1:2+ ⚡
-Quality > Quantity 💯
+<b>WEEKLY Options:</b>
+✅ Fetch: 11 strikes (ATM ± 5)
+✅ Deep: 5 strikes (ATM ± 2)
+✅ Total OI + Price context
 
 ━━━━━━━━━━━━━━━━━━━━
-⏰ Started: {current_time}
-🤖 Mode: Alert Only
+🔧 <b>TIMING &amp; WARMUP</b>
 ━━━━━━━━━━━━━━━━━━━━
+
+• First Data: 9:16 AM
+• Early Signals: 9:21 AM (≥85%)
+• Full Signals: 9:31 AM (≥70%)
+• Warmup: {WARMUP_MINUTES} min
+• Scan: {SCAN_INTERVAL}s
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ <b>OI THRESHOLDS</b>
+━━━━━━━━━━━━━━━━━━━━
+
+<b>Entry:</b>
+• 5m OI: &lt; -{MIN_OI_5M_FOR_ENTRY}%
+• 15m OI: &lt; -{MIN_OI_15M_FOR_ENTRY}%
+
+<b>Strong:</b>
+• 5m: &lt; -{STRONG_OI_5M_THRESHOLD}%
+• 15m: &lt; -{STRONG_OI_15M_THRESHOLD}%
+
+━━━━━━━━━━━━━━━━━━━━
+🎯 <b>RISK MANAGEMENT</b>
+━━━━━━━━━━━━━━━━━━━━
+
+• Premium SL: {PREMIUM_SL_PERCENT}%
+• Trailing SL: {'ON' if ENABLE_TRAILING_SL else 'OFF'}
+• Min Confidence: {MIN_CONFIDENCE}%
+
+━━━━━━━━━━━━━━━━━━━━
+⏰ Started at {current_time}
 """
         
-        await self.telegram.send(startup_msg)
-        logger.info("✅ Bot initialized successfully")
-        logger.info(f"📅 Monthly Futures: {futures_contract} (Expiry: {monthly_expiry})")
-        logger.info(f"📅 Weekly Options: {weekly_expiry}")
-        logger.info(f"📊 Strike Strategy: Fetch 11, Analyze 5 deep")
+        if self.telegram.is_enabled():
+            await self.telegram.send(startup_msg)
+        
+        logger.info("✅ Bot initialized (FIXED)")
+        logger.info(f"📅 Monthly: {futures_contract}")
+        logger.info(f"📅 Weekly: {weekly_expiry}")
         logger.info("=" * 60)
     
+    async def shutdown(self):
+        """Shutdown bot"""
+        logger.info("🛑 Shutting down...")
+        self.running = False
+        
+        if self.upstox:
+            await self.upstox.__aexit__(None, None, None)
+        
+        logger.info("✅ Shutdown complete")
+    
     async def run(self):
-        """Main run loop"""
+        """Main loop"""
+        self.running = True
+        
         try:
             await self.initialize()
             
-            while True:
+            while self.running:
                 try:
                     await self._cycle()
                 except Exception as e:
-                    logger.error(f"❌ Cycle error: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error(f"❌ Cycle error: {e}", exc_info=True)
                 
-                await asyncio.sleep(60)  # 60 seconds = 1 minute scan
+                await asyncio.sleep(SCAN_INTERVAL)
         
         except KeyboardInterrupt:
-            logger.info("🛑 Bot stopped by user")
-        except Exception as e:
-            logger.error(f"💥 Bot crashed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.info("⚠️ Keyboard interrupt")
         finally:
-            if self.upstox:
-                await self.upstox.__aexit__(None, None, None)
-    
-    def should_update_15min(self):
-        """Check if 15-min S/R needs update"""
-        if self.last_m15_update is None:
-            return True
-        
-        now = get_ist_time()
-        elapsed = (now - self.last_m15_update).total_seconds() / 60
-        return elapsed >= 15
-    
-    def should_update_5min(self):
-        """Check if 5-min S/R needs update"""
-        if self.last_m5_update is None:
-            return True
-        
-        now = get_ist_time()
-        elapsed = (now - self.last_m5_update).total_seconds() / 60
-        return elapsed >= 5
-    
-    def is_new_day(self):
-        """Check if it's a new day"""
-        if self.last_daily_update is None:
-            return True
-        
-        now = get_ist_time()
-        return now.date() != self.last_daily_update.date()
+            await self.shutdown()
     
     async def _cycle(self):
-        """Single scan cycle with V3 features"""
+        """Single scan cycle - FIXED VERSION"""
         now = get_ist_time()
         status, _ = get_market_status()
         current_time = now.time()
@@ -211,148 +211,63 @@ Quality > Quantity 💯
             return
         
         if current_time >= time(9, 15) and current_time < time(9, 16):
-            logger.info("⏭️ Skipping 9:15 AM (freak trade prevention)")
+            logger.info("⏭️ Skipping 9:15 AM")
             return
         
         logger.info("📥 Fetching market data...")
         
-        # ========== STEP 1: UPDATE S/R LEVELS (Smart caching!) ==========
+        # ========== FETCH DATA ==========
         
-        # 🆕 V3: Update Daily S/R (once per day)
-        if self.is_new_day():
-            logger.info("📊 Updating Daily S/R levels...")
-            daily_df = await self.data_fetcher.fetch_daily_candles(20)
-            if daily_df is not None and len(daily_df) >= 10:
-                self.daily_sr = self.sr_analyzer.find_pivot_points(
-                    daily_df, lookback=20, distance=5
-                )
-                self.last_daily_update = now
-                logger.info(f"  ✅ Daily S/R: S {self.daily_sr.get('support', [])} | R {self.daily_sr.get('resistance', [])}")
-        
-        # 🆕 V3: Update 15-min S/R (every 15 min)
-        if self.should_update_15min():
-            logger.info("📊 Updating 15-min S/R levels...")
-            m15_df = await self.data_fetcher.fetch_15min_candles(90)
-            if m15_df is not None and len(m15_df) >= 20:
-                self.m15_sr = self.sr_analyzer.find_pivot_points(
-                    m15_df, lookback=90, distance=8
-                )
-                self.last_m15_update = now
-                logger.info(f"  ✅ 15-min S/R updated ({len(m15_df)} candles)")
-        
-        # 🆕 V3: Update 5-min S/R (every 5 min)
-        if self.should_update_5min():
-            logger.info("📊 Updating 5-min S/R levels...")
-            m5_df = await self.data_fetcher.fetch_futures_candles()  # Already 5-min (1-min technically but recent)
-            if m5_df is not None and len(m5_df) >= 20:
-                self.m5_sr = self.sr_analyzer.find_pivot_points(
-                    m5_df, lookback=60, distance=10
-                )
-                self.last_m5_update = now
-                logger.info(f"  ✅ 5-min S/R updated ({len(m5_df)} candles)")
-        
-        # ========== STEP 2: FETCH LIVE DATA ==========
-        
-        # Fetch spot
         spot = await self.data_fetcher.fetch_spot()
         if not validate_price(spot):
-            logger.error("❌ STOP: Spot validation failed")
+            logger.error("❌ Spot validation failed")
             return
         logger.info(f"  ✅ Spot: ₹{spot:.2f}")
         
-        # Fetch futures candles
         futures_df = await self.data_fetcher.fetch_futures_candles()
         if not validate_candle_data(futures_df):
-            logger.error("❌ STOP: Futures candles validation failed")
+            logger.error("❌ Futures candles validation failed")
             return
-        logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars (for VWAP/ATR)")
+        logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars")
         
-        # Fetch futures LTP
         futures_ltp = await self.data_fetcher.fetch_futures_ltp()
         if not validate_price(futures_ltp):
-            logger.error("❌ STOP: Live Futures price validation failed")
+            logger.error("❌ Live Futures price validation failed")
             return
-        logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f} (REAL-TIME)")
+        logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f}")
         
-        # 🆕 V2: Fetch volume with delta
-        cumulative_vol, delta_vol, avg_delta = await self.data_fetcher.fetch_futures_live_volume()
+        # Save price & get change
+        self.memory.save_price(futures_ltp)
         
-        if delta_vol is not None:
-            logger.info(f"  ✅ Volume Delta (1-min): {delta_vol:,.0f} (DELTA MODE)")
-        elif cumulative_vol:
-            logger.info(f"  ✅ Futures LIVE Volume: {cumulative_vol:,.0f} (cumulative)")
-        else:
-            logger.warning(f"  ⚠️ Live volume fetch failed, will use candle data")
+        price_5m, has_price_5m = self.memory.get_price_change(5)
+        price_15m, has_price_15m = self.memory.get_price_change(15)
+        price_stats = self.memory.get_price_stats()
         
-        # 🆕 V2: Update live VWAP
-        live_vwap = None
-        if delta_vol and delta_vol > 0:
-            live_vwap = self.data_fetcher.update_live_vwap(futures_ltp, delta_vol)
-            if live_vwap:
-                logger.info(f"  ✅ Live VWAP updated: ₹{live_vwap:.2f}")
+        logger.info(f"  🆕 Price Changes:")
+        logger.info(f"     5m:  {price_5m:+.2f}% {'✅' if has_price_5m else '⏳'}")
+        logger.info(f"     15m: {price_15m:+.2f}% {'✅' if has_price_15m else '⏳'}")
+        logger.info(f"     From Open: {price_stats['change_from_open']:+.2f}%")
         
-        # 🆕 V2: Check if candles frozen
-        candle_frozen = self.data_fetcher.is_candle_frozen()
-        if candle_frozen:
-            logger.warning(f"  🚨 OPERATING IN FALLBACK MODE - Candles frozen!")
-        
-        # Compare candle close vs live price
-        candle_close = futures_df['close'].iloc[-1]
-        price_diff = futures_ltp - candle_close
-        logger.info(f"  📊 Price Check: Candle={candle_close:.2f}, Live={futures_ltp:.2f}, Diff={price_diff:+.2f}")
-        
-        # Calculate ATM from futures
-        atm_from_futures = calculate_atm_strike(futures_ltp)
-        logger.info(f"  📊 ATM Calculation: Spot={spot:.2f} → {calculate_atm_strike(spot)}, Futures={futures_ltp:.2f} → {atm_from_futures}")
-        
-        # Fetch option chain
-        option_result = await self.data_fetcher.fetch_option_chain(futures_ltp)
+        option_result = await self.data_fetcher.fetch_option_chain(spot)
         if not option_result:
-            logger.error("❌ STOP: Option chain returned None")
+            logger.error("❌ Option chain returned None")
             return
         
         atm, strike_data = option_result
-        
-        if atm != atm_from_futures:
-            logger.warning(f"⚠️ ATM MISMATCH: Expected {atm_from_futures}, Got {atm}")
-            logger.warning(f"   Using {atm_from_futures} (from FUTURES price)")
-            atm = atm_from_futures
-        
         if not validate_strike_data(strike_data):
-            logger.error(f"❌ STOP: Strike validation failed")
+            logger.error(f"❌ Strike validation failed")
             return
         
         deep_strikes = get_deep_analysis_strikes(atm)
         logger.info(f"  ✅ Strikes: {len(strike_data)} total (ATM {atm})")
-        logger.info(f"  🔍 Deep Analysis: {len(deep_strikes)} strikes {deep_strikes[0]}-{deep_strikes[-1]}")
-        
-        # 🆕 V2: Validate ATM
-        if self.previous_atm is not None:
-            atm_valid, atm_reason = self.oi_analyzer.validate_atm_strike(
-                atm, self.previous_atm, futures_ltp
-            )
-            if not atm_valid:
-                logger.error(f"❌ ATM VALIDATION FAILED: {atm_reason}")
-                logger.error(f"   Skipping this cycle - ATM seems wrong!")
-                return
-        
-        self.previous_atm = atm
+        logger.info(f"  🔍 Deep: {len(deep_strikes)} strikes")
         
         futures_price = futures_ltp
+        logger.info(f"\n💹 Prices: Spot={spot:.2f}, Futures={futures_price:.2f}, ATM={atm}")
         
-        # 🆕 V3.5: Track price history for OI + Price analysis
-        self.data_fetcher.update_price_history(futures_price)
+        # ========== SAVE OI SNAPSHOTS ==========
         
-        logger.info(f"\n💹 PRICES & ATM:")
-        logger.info(f"  Spot: ₹{spot:.2f} (reference only)")
-        logger.info(f"  Futures LIVE: ₹{futures_price:.2f} (TRADING PRICE)")
-        logger.info(f"  ATM Strike: {atm} (calculated from FUTURES, not spot)")
-        logger.info(f"  Spread: Futures-Spot = {futures_price - spot:+.2f} pts")
-        
-        # ========== STEP 3: OI ANALYSIS ==========
-        
-        logger.info("🔄 Saving OI snapshots (11 strikes)...")
-        
+        logger.info("🔄 Saving OI snapshots...")
         total_ce, total_pe = self.oi_analyzer.calculate_total_oi(strike_data)
         deep_ce, deep_pe, _ = self.oi_analyzer.calculate_deep_analysis_oi(strike_data, atm)
         
@@ -361,162 +276,81 @@ Quality > Quantity 💯
         for strike, data in strike_data.items():
             self.memory.save_strike(strike, data)
         
-        first_snapshot = self.memory.first_snapshot_time
-        if not first_snapshot:
-            logger.info(f"📍 FIRST SNAPSHOT at {now.strftime('%H:%M')} - BASE REFERENCE")
-            self.memory.mark_first_snapshot(now)
-            logger.info(f"💾 First snapshot saved: CE={total_ce:,.0f}, PE={total_pe:,.0f}")
+        logger.info(f"  ✅ Total OI: CE={total_ce:,.0f}, PE={total_pe:,.0f}")
+        logger.info(f"  🔍 Deep OI: CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
         
-        logger.info(f"  ✅ Total OI (11 strikes): CE={total_ce:,.0f}, PE={total_pe:,.0f}")
-        logger.info(f"  🔍 Deep OI (5 strikes): CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
+        # ========== 🔧 FIX #1: ATM OI CALCULATION ==========
         
         logger.info("📊 Calculating OI changes...")
         
         ce_5m, pe_5m, has_5m = self.memory.get_total_oi_change(total_ce, total_pe, 5)
         ce_15m, pe_15m, has_15m = self.memory.get_total_oi_change(total_ce, total_pe, 15)
         
-        atm_info = self.oi_analyzer.get_atm_oi_changes(
-            strike_data, 
-            atm, 
-            self.previous_strike_data
-        )
-        
+        # 🔧 FIX: Use Redis memory for ATM OI changes
         atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
         atm_ce_5m, atm_pe_5m, has_atm_5m = self.memory.get_strike_oi_change(atm, atm_data, 5)
         atm_ce_15m, atm_pe_15m, has_atm_15m = self.memory.get_strike_oi_change(atm, atm_data, 15)
         
-        if not atm_info['has_previous_data']:
-            atm_info['ce_change_pct'] = atm_ce_15m
-            atm_info['pe_change_pct'] = atm_pe_15m
-        
-        self.previous_strike_data = strike_data
-        
         logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
         logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-        logger.info(f"  ATM {atm}: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}%")
+        logger.info(f"  ATM: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_atm_15m else '⏳'}")
         
-        # 🆕 V3.5: OI + Price Direction Analysis
-        price_5m_ago = self.data_fetcher.get_price_at_time(5)
-        price_15m_ago = self.data_fetcher.get_price_at_time(15)
+        # ========== PRICE-AWARE OI ANALYSIS ==========
         
-        oi_price_5m = None
-        oi_price_15m = None
+        logger.info("\n🔥 PRICE-AWARE OI ANALYSIS:")
         
-        if price_5m_ago and has_5m:
-            oi_price_5m = self.oi_analyzer.analyze_oi_with_price(
-                ce_5m, pe_5m, futures_price, price_5m_ago
-            )
-            logger.info(f"\n🔥 5m OI+PRICE: {oi_price_5m['scenario']}")
-            logger.info(f"   Confidence: {oi_price_5m['confidence']}% | Bias: {oi_price_5m['bias']}")
-            logger.info(f"   Reason: {oi_price_5m['reason']}")
-            logger.info(f"   Action: {oi_price_5m['action']}")
-        
-        if price_15m_ago and has_15m:
-            oi_price_15m = self.oi_analyzer.analyze_oi_with_price(
-                ce_15m, pe_15m, futures_price, price_15m_ago
-            )
-            logger.info(f"\n🔥 15m OI+PRICE: {oi_price_15m['scenario']}")
-            logger.info(f"   Confidence: {oi_price_15m['confidence']}% | Bias: {oi_price_15m['bias']}")
-            logger.info(f"   Reason: {oi_price_15m['reason']}")
-            logger.info(f"   Action: {oi_price_15m['action']}")
-        
-        # ========== STEP 4: TECHNICAL ANALYSIS ==========
-        
-        logger.info("🔍 Running technical analysis...")
-        
-        pcr = self.oi_analyzer.calculate_pcr(total_pe, total_ce)
-        
-        # 🆕 V3.5: PCR Zone Analysis
-        pcr_zone = self.oi_analyzer.analyze_pcr_zone(pcr)
-        logger.info(f"\n📊 PCR ANALYSIS:")
-        logger.info(f"   PCR: {pcr:.2f}")
-        logger.info(f"   Zone: {pcr_zone['zone']}")
-        logger.info(f"   Signal: {pcr_zone['signal'] or 'None'}")
-        logger.info(f"   Confidence: {pcr_zone['confidence']}%")
-        logger.info(f"   Reason: {pcr_zone['reason']}")
-        
-        # 🆕 V3.5: Max Pain Analysis
-        max_pain_analysis = self.oi_analyzer.calculate_max_pain(strike_data, futures_price)
-        if max_pain_analysis['max_pain']:
-            logger.info(f"\n🎯 MAX PAIN ANALYSIS:")
-            logger.info(f"   Max Pain: {max_pain_analysis['max_pain']:.0f}")
-            logger.info(f"   Current: {futures_price:.2f}")
-            logger.info(f"   Distance: {max_pain_analysis['distance']:+.1f} pts")
-            logger.info(f"   Signal: {max_pain_analysis['signal'] or 'None'}")
-            logger.info(f"   Confidence: {max_pain_analysis['confidence']}%")
-            logger.info(f"   Reason: {max_pain_analysis['reason']}")
-        
-        # VWAP with fallback
-        vwap = self.technical_analyzer.calculate_vwap(
-            futures_df, 
-            live_vwap_fallback=live_vwap
+        oi_scenario = self.oi_analyzer.analyze_oi_with_price(
+            ce_5m=ce_5m,
+            ce_15m=ce_15m,
+            pe_5m=pe_5m,
+            pe_15m=pe_15m,
+            price_change_pct=price_5m if has_price_5m else 0.0
         )
         
-        # 🆕 V3: EMA-9 (simplified!)
-        ema9 = self.technical_analyzer.calculate_ema9(futures_df)
+        logger.info(f"  📊 Primary Direction: {oi_scenario['primary_direction']}")
+        logger.info(f"  🎯 Confidence Boost: {oi_scenario['confidence_boost']:+d}%")
         
-        # ATR with synthetic fallback
-        if candle_frozen:
-            synthetic_atr = self.data_fetcher.calculate_synthetic_atr()
-            logger.info(f"  📊 Using SYNTHETIC ATR: {synthetic_atr:.1f} (candles frozen)")
-            atr = self.technical_analyzer.calculate_atr(
-                futures_df, 
-                synthetic_atr_fallback=synthetic_atr
-            )
-        else:
-            atr = self.technical_analyzer.calculate_atr(futures_df)
+        if oi_scenario['ce_scenario']:
+            ce_detail = oi_scenario['details'].get('ce', {})
+            logger.info(f"\n  📞 CE: {oi_scenario['ce_scenario']} ({oi_scenario['ce_signal']})")
+            if ce_detail.get('warning'):
+                logger.warning(f"     ⚠️ {ce_detail['warning']}")
         
+        if oi_scenario['pe_scenario']:
+            pe_detail = oi_scenario['details'].get('pe', {})
+            logger.info(f"  📞 PE: {oi_scenario['pe_scenario']} ({oi_scenario['pe_signal']})")
+            if pe_detail.get('warning'):
+                logger.warning(f"     ⚠️ {pe_detail['warning']}")
+        
+        # ========== TECHNICAL ANALYSIS ==========
+        
+        logger.info("\n🔍 Running technical analysis...")
+        
+        pcr = self.oi_analyzer.calculate_pcr(total_pe, total_ce)
+        vwap = self.technical_analyzer.calculate_vwap(futures_df)
+        atr = self.technical_analyzer.calculate_atr(futures_df)
         vwap_dist = self.technical_analyzer.calculate_vwap_distance(futures_price, vwap) if vwap else 0
         candle = self.technical_analyzer.analyze_candle(futures_df)
         momentum = self.technical_analyzer.detect_momentum(futures_df)
         
-        # 🆕 V3.5: Gamma Wall Detection (after momentum!)
-        gamma_analysis = self.oi_analyzer.detect_gamma_walls(
-            strike_data, 
-            futures_price, 
-            price_momentum=momentum
-        )
-        if gamma_analysis['nearest_wall']:
-            logger.info(f"\n⚡ GAMMA WALL ANALYSIS:")
-            logger.info(f"   Nearest Wall: {gamma_analysis['nearest_wall']['strike']} ({gamma_analysis['nearest_wall']['type']})")
-            logger.info(f"   Distance: {gamma_analysis['nearest_wall']['distance']:.1f} pts")
-            logger.info(f"   OI: {gamma_analysis['nearest_wall']['total_oi']:,.0f} (CE: {gamma_analysis['nearest_wall']['ce_oi']:,.0f}, PE: {gamma_analysis['nearest_wall']['pe_oi']:,.0f})")
-            logger.info(f"   Strength: {gamma_analysis['nearest_wall']['strength']}")
-            logger.info(f"   Signal: {gamma_analysis['signal'] or 'None'}")
-            logger.info(f"   Confidence: {gamma_analysis['confidence']}%")
-            logger.info(f"   Reason: {gamma_analysis['reason']}")
+        vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df)
         
-        # Volume analysis with DELTA
-        vol_trend = self.volume_analyzer.analyze_volume_trend(
-            futures_df,
-            live_volume_delta=delta_vol,
-            candle_frozen=candle_frozen
-        )
-        
-        logger.info(f"📊 VOLUME ANALYSIS RESULT:")
-        logger.info(f"   Source: {vol_trend.get('source', 'UNKNOWN')}")
-        logger.info(f"   Trend: {vol_trend['trend']}")
-        logger.info(f"   Current: {vol_trend['current_volume']:,.0f}")
-        logger.info(f"   Average: {vol_trend['avg_volume']:,.0f}")
-        logger.info(f"   Ratio: {vol_trend['ratio']:.2f}x")
+        # 🔍 VOLUME DEBUG
+        logger.info(f"\n🔍 VOLUME DEBUG:")
+        logger.info(f"  Total candles: {len(futures_df)}")
+        logger.info(f"  Last 7 volumes: {futures_df['volume'].tail(7).tolist()}")
+        logger.info(f"  Completed (skip last): {futures_df['volume'].tail(7)[:-1].tolist()}")
+        logger.info(f"  Avg volume: {vol_trend['avg_volume']}")
+        logger.info(f"  Current volume: {vol_trend['current_volume']}")
+        logger.info(f"  Calculated ratio: {vol_trend['ratio']}")
         
         vol_spike, vol_ratio = self.volume_analyzer.detect_volume_spike(
-            vol_trend['current_volume'], 
-            vol_trend['avg_volume'],
-            adaptive_threshold=vol_trend.get('adaptive_threshold')
+            vol_trend['current_volume'], vol_trend['avg_volume']
         )
-        
         order_flow = self.volume_analyzer.calculate_order_flow(strike_data)
+        
         gamma = self.market_analyzer.detect_gamma_zone()
         unwinding = self.oi_analyzer.detect_unwinding(ce_5m, ce_15m, pe_5m, pe_15m)
-        
-        # Check conflicting OI
-        is_conflicting, conflict_reason = self.oi_analyzer.detect_conflicting_oi(
-            ce_5m, ce_15m, pe_5m, pe_15m
-        )
-        
-        if is_conflicting:
-            logger.warning(f"⚠️ CONFLICTING OI DETECTED: {conflict_reason}")
         
         if ce_15m < -STRONG_OI_15M_THRESHOLD or pe_15m < -STRONG_OI_15M_THRESHOLD:
             oi_strength = 'strong'
@@ -525,238 +359,169 @@ Quality > Quantity 💯
         else:
             oi_strength = 'weak'
         
-        # 🆕 V3: S/R ANALYSIS
-        price_location = None
-        confluence_zones = None
-        nearest_levels = None
+        logger.info(f"\n📊 TECHNICAL SUMMARY:")
+        logger.info(f"  PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
+        logger.info(f"  Price vs VWAP: {vwap_dist:+.1f} pts")
+        logger.info(f"  Volume: {vol_ratio:.1f}x {'🔥SPIKE' if vol_spike else ''}")
+        logger.info(f"  Flow: {order_flow:.2f}, Momentum: {momentum['direction']}")
+        logger.info(f"  OI Strength: {oi_strength}")
         
-        if self.daily_sr and self.m15_sr and self.m5_sr:
-            # Find confluence zones
-            confluence_zones = self.sr_analyzer.find_confluence_zones(
-                self.daily_sr, self.m15_sr, self.m5_sr, tolerance=20
-            )
-            
-            # Check price location
-            price_location = self.sr_analyzer.check_price_location(
-                futures_price, 
-                {'support': confluence_zones.get('support', []), 
-                 'resistance': confluence_zones.get('resistance', [])},
-                tolerance=30
-            )
-            
-            # Get nearest levels
-            nearest_levels = self.sr_analyzer.get_nearest_levels(
-                futures_price,
-                {'support': [s['level'] if isinstance(s, dict) else s for s in confluence_zones.get('support', [])],
-                 'resistance': [r['level'] if isinstance(r, dict) else r for r in confluence_zones.get('resistance', [])]}
-            )
-            
-            logger.info(f"\n📍 S/R ANALYSIS:")
-            logger.info(f"  Location: {price_location.get('location', 'unknown')}")
-            if nearest_levels:
-                logger.info(f"  Nearest Support: {nearest_levels.get('support')} ({nearest_levels.get('support_distance')} pts)")
-                logger.info(f"  Nearest Resistance: {nearest_levels.get('resistance')} ({nearest_levels.get('resistance_distance')} pts)")
-        
-        # 🆕 V3: PRICE ACTION ANALYSIS
-        rejection_pattern = self.price_action_analyzer.detect_rejection_candle(
-            candle,
-            sr_level=nearest_levels.get('resistance') if nearest_levels and price_location and price_location.get('location') == 'at_resistance' else None
-        )
-        
-        engulfing_pattern = self.price_action_analyzer.detect_engulfing(futures_df)
-        
-        if rejection_pattern:
-            logger.info(f"\n🕯️ PRICE ACTION: {rejection_pattern['pattern']} detected!")
-            logger.info(f"  Confidence: {rejection_pattern['confidence']}%")
-        
-        if engulfing_pattern:
-            logger.info(f"\n🕯️ PRICE ACTION: {engulfing_pattern['pattern']} detected!")
-            logger.info(f"  Confidence: {engulfing_pattern['confidence']}%")
-        
-        logger.info(f"\n📊 ANALYSIS COMPLETE:")
-        logger.info(f"  📈 PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
-        if ema9:
-            logger.info(f"  📈 EMA-9: ₹{ema9:.2f} (Price {'above' if futures_price > ema9 else 'below'})")
-        logger.info(f"  📍 Price vs VWAP: {vwap_dist:+.1f} pts (LIVE price)")
-        logger.info(f"  🔄 OI Changes (Total - 11 strikes):")
-        logger.info(f"     5m:  CE {ce_5m:+.1f}% | PE {pe_5m:+.1f}%")
-        logger.info(f"     15m: CE {ce_15m:+.1f}% | PE {pe_15m:+.1f}% (Strength: {oi_strength})")
-        if is_conflicting:
-            logger.info(f"  ⚠️ OI Status: {conflict_reason}")
-        logger.info(f"  📊 Volume: {vol_ratio:.1f}x {'🔥SPIKE' if vol_spike else ''}")
-        logger.info(f"  💨 Flow: {order_flow:.2f}, Momentum: {momentum['direction']}")
-        logger.info(f"  🎯 Gamma Zone: {gamma}")
-        
-        # ========== STEP 5: CHECK WARMUP ==========
+        # ========== WARMUP CHECK ==========
         
         stats = self.memory.get_stats()
         logger.info(f"\n⏱️  WARMUP STATUS:")
         if stats['first_snapshot_time']:
-            logger.info(f"  Base Time: {stats['first_snapshot_time'].strftime('%H:%M')}")
+            logger.info(f"  Base: {stats['first_snapshot_time'].strftime('%H:%M')}")
         logger.info(f"  Elapsed: {stats['elapsed_minutes']:.1f} min")
-        logger.info(f"  5m Ready: {'✅' if stats['warmed_up_5m'] else '⏳'}")
-        logger.info(f"  10m Ready: {'✅' if stats['warmed_up_10m'] else '⏳'}")
-        logger.info(f"  15m Ready: {'✅' if stats['warmed_up_15m'] else '⏳'}")
+        logger.info(f"  5m: {'✅' if stats['warmed_up_5m'] else '⏳'}")
+        logger.info(f"  15m: {'✅' if stats['warmed_up_15m'] else '⏳'}")
         
         full_warmup = stats['warmed_up_15m']
-        early_warmup = stats['warmed_up_10m']
+        early_warmup = stats['warmed_up_5m'] and stats['elapsed_minutes'] >= 5
         
-        if not full_warmup:
-            remaining = 15 - stats['elapsed_minutes']
-            if early_warmup:
-                logger.info(f"\n⚡ EARLY WARMUP READY - High confidence signals only!")
+        if not full_warmup and not early_warmup:
+            remaining = WARMUP_MINUTES - stats['elapsed_minutes']
+            logger.info(f"\n🚫 SIGNALS BLOCKED - {remaining:.1f} min remaining")
+            return
+        
+        if full_warmup:
+            logger.info(f"\n✅ FULL WARMUP COMPLETE")
+        else:
+            logger.info(f"\n⚡ EARLY WARMUP READY")
+        
+        # ========== EXIT CHECK ==========
+        
+        if self.position_tracker.has_active_position():
+            logger.info(f"📍 Checking exit conditions...")
+            
+            current_data = {
+                'ce_oi_5m': ce_5m,
+                'pe_oi_5m': pe_5m,
+                'volume_ratio': vol_ratio,
+                'candle_data': candle,
+                'futures_price': futures_price,
+                'atm_data': atm_data
+            }
+            
+            exit_check = self.position_tracker.check_exit_conditions(current_data)
+            
+            if exit_check:
+                should_exit, reason, details = exit_check
+                
+                if reason == "SL_UPDATED" and not should_exit:
+                    if self.telegram.is_enabled():
+                        msg = f"🔒 <b>TRAILING SL UPDATED</b>\n\n{details}"
+                        await self.telegram.send_update(msg)
+                    logger.info(f"📢 Trailing SL: {details}")
+                
+                elif should_exit:
+                    exit_premium = self.position_tracker._estimate_premium(current_data, 
+                        self.position_tracker.active_position.signal)
+                    
+                    self.signal_validator.record_exit(
+                        self.position_tracker.active_position.signal.signal_type,
+                        self.position_tracker.active_position.signal.atm_strike
+                    )
+                    
+                    self.position_tracker.close_position(reason, details, exit_premium)
+                    
+                    if self.telegram.is_enabled():
+                        msg = self.formatter.format_exit_signal(
+                            self.position_tracker.closed_positions[-1],
+                            reason, details
+                        )
+                        await self.telegram.send_exit(msg)
+                    
+                    logger.info(f"🚪 EXIT: {reason} - {details}")
+                    self.exit_triggered_this_cycle = True
             else:
-                logger.info(f"\n🚫 SIGNALS BLOCKED - Warmup: {remaining:.1f} min remaining")
-                if is_conflicting:
-                    logger.info(f"   Additional block: {conflict_reason}")
-                return
+                logger.info(f"✅ Position holding")
         
-        # ========== STEP 6: SIGNAL GENERATION ==========
+        # ========== ENTRY SIGNAL ==========
         
-        logger.info("\n🔎 SIGNAL GENERATION:")
+        if self.exit_triggered_this_cycle:
+            logger.info(f"\n⏸️ EXIT triggered - skipping entry")
+            return
         
-        active_position = self.position_tracker.get_active_position()
+        signal_allowed, signal_msg = is_signal_time(warmup_complete=full_warmup or early_warmup)
         
-        if not active_position:
-            logger.info("  No active position - checking for entry...")
+        if not self.position_tracker.has_active_position() and signal_allowed:
+            logger.info(f"\n🔎 SIGNAL GENERATION:")
+            logger.info(f"  Checking for entry...")
             
-            if is_conflicting:
-                logger.info(f"🚫 SIGNALS BLOCKED - {conflict_reason}")
-                return
-            
-            # 🆕 V3.5: Block on weak OI+Price scenarios
-            if oi_price_15m and oi_price_15m['action'] == 'AVOID':
-                logger.info(f"🚫 SIGNALS BLOCKED - {oi_price_15m['scenario']} (weak move, avoid trading)")
-                return
-            
-            if oi_price_5m and oi_price_5m['action'] == 'WAIT':
-                logger.info(f"⏸️  SIGNALS PAUSED - {oi_price_5m['scenario']} (unclear, waiting for clarity)")
-                return
-            
-            # 🆕 V3.5: Confluence Detection (multiple confirmations!)
-            confluence_signals = []
-            confluence_confidence = 0
-            
-            # Check OI+Price
-            if oi_price_15m and oi_price_15m['signal']:
-                confluence_signals.append(f"OI+Price:{oi_price_15m['signal']}")
-                if oi_price_15m['confidence'] >= 80:
-                    confluence_confidence += 15
-            
-            # Check PCR Zone
-            if pcr_zone['signal'] and pcr_zone['confidence'] >= 70:
-                confluence_signals.append(f"PCR:{pcr_zone['signal']}")
-                confluence_confidence += 10
-            
-            # Check Max Pain
-            if max_pain_analysis['signal'] and max_pain_analysis['signal'] not in ['WAIT', None]:
-                confluence_signals.append(f"MaxPain:{max_pain_analysis['signal']}")
-                confluence_confidence += 10
-            
-            # Check Gamma Wall
-            if gamma_analysis['signal'] and gamma_analysis['signal'] not in ['WATCH_BREAKOUT', 'WATCH_BREAKDOWN', None]:
-                confluence_signals.append(f"Gamma:{gamma_analysis['signal']}")
-                confluence_confidence += 12
-            
-            # Log confluence
-            if len(confluence_signals) >= 2:
-                logger.info(f"\n🔥 CONFLUENCE DETECTED!")
-                logger.info(f"   Confirmations: {len(confluence_signals)}")
-                logger.info(f"   Signals: {', '.join(confluence_signals)}")
-                logger.info(f"   Confidence Boost: +{confluence_confidence}%")
-            
-            # Generate signal with V3 features
             signal = self.signal_gen.generate(
-                spot_price=spot,
+                spot_price=spot, 
                 futures_price=futures_price,
                 vwap=vwap,
-                vwap_distance=vwap_dist,
-                pcr=pcr,
-                atr=atr,
+                vwap_distance=vwap_dist, 
+                pcr=pcr, 
+                atr=atr, 
                 atm_strike=atm,
-                atm_data=atm_data,
-                ce_total_5m=ce_5m,
+                atm_data=atm_data, 
+                ce_total_5m=ce_5m, 
                 pe_total_5m=pe_5m,
-                ce_total_15m=ce_15m,
+                ce_total_15m=ce_15m, 
                 pe_total_15m=pe_15m,
-                atm_ce_5m=atm_ce_5m,
+                atm_ce_5m=atm_ce_5m, 
                 atm_pe_5m=atm_pe_5m,
-                atm_ce_15m=atm_ce_15m,
+                atm_ce_15m=atm_ce_15m, 
                 atm_pe_15m=atm_pe_15m,
-                has_5m_total=has_5m,
+                has_5m_total=has_5m, 
                 has_15m_total=has_15m,
-                has_5m_atm=has_atm_5m,
+                has_5m_atm=has_atm_5m, 
                 has_15m_atm=has_atm_15m,
-                volume_spike=vol_spike,
+                volume_spike=vol_spike, 
                 volume_ratio=vol_ratio,
-                order_flow=order_flow,
+                order_flow=order_flow, 
                 candle_data=candle,
-                gamma_zone=gamma,
+                gamma_zone=gamma, 
                 momentum=momentum,
-                multi_tf=False,
+                multi_tf=unwinding['multi_timeframe'],
                 oi_strength=oi_strength,
-                # 🆕 V3: New parameters (optional - signal_engine handles gracefully)
-                price_location=price_location,
-                nearest_levels=nearest_levels,
-                rejection_pattern=rejection_pattern,
-                engulfing_pattern=engulfing_pattern
+                oi_scenario=oi_scenario
             )
             
-            if signal:
-                # 🆕 V3.5: Apply confluence boost
-                if confluence_confidence > 0:
-                    original_conf = signal['confidence']
-                    signal['confidence'] = min(95, signal['confidence'] + confluence_confidence)
-                    logger.info(f"\n🎯 {signal['type']} SIGNAL GENERATED!")
-                    logger.info(f"  Base Confidence: {original_conf}%")
-                    logger.info(f"  Confluence Boost: +{confluence_confidence}%")
-                    logger.info(f"  Final Confidence: {signal['confidence']}% 🔥")
-                    logger.info(f"  Reason: {signal['reason']}")
-                else:
-                    logger.info(f"\n🎯 {signal['type']} SIGNAL GENERATED!")
-                    logger.info(f"  Confidence: {signal['confidence']}%")
-                    logger.info(f"  Reason: {signal['reason']}")
+            if not full_warmup and signal:
+                if signal.confidence < EARLY_SIGNAL_CONFIDENCE:
+                    logger.info(f"  ⚡ Early signal {signal.confidence}% < {EARLY_SIGNAL_CONFIDENCE}%")
+                    signal = None
+            
+            validated = self.signal_validator.validate(signal)
+            
+            if validated:
+                logger.info(f"\n🔔 SIGNAL GENERATED!")
+                logger.info(f"  Type: {validated.signal_type.value}")
+                logger.info(f"  Entry: ₹{validated.entry_price:.2f}")
+                logger.info(f"  Confidence: {validated.confidence}%")
+                logger.info(f"  VWAP Score: {validated.vwap_score}/100")
+                logger.info(f"  OI Strength: {validated.oi_strength}")
                 
-                # Format and send alert
-                alert_msg = self.formatter.format_signal_alert(
-                    signal=signal,
-                    spot=spot,
-                    futures=futures_price,
-                    atm=atm,
-                    oi_data={
-                        'ce_5m': ce_5m, 'ce_15m': ce_15m,
-                        'pe_5m': pe_5m, 'pe_15m': pe_15m,
-                        'atm_ce': atm_ce_15m, 'atm_pe': atm_pe_15m
-                    },
-                    technical_data={
-                        'pcr': pcr, 'vwap': vwap, 'ema9': ema9, 'atr': atr,
-                        'volume_ratio': vol_ratio, 'order_flow': order_flow,
-                        'momentum': momentum['direction']
-                    },
-                    sr_data={
-                        'location': price_location.get('location') if price_location else None,
-                        'nearest_support': nearest_levels.get('support') if nearest_levels else None,
-                        'nearest_resistance': nearest_levels.get('resistance') if nearest_levels else None
-                    },
-                    price_action={
-                        'rejection': rejection_pattern,
-                        'engulfing': engulfing_pattern
-                    }
-                )
+                if hasattr(validated, 'oi_scenario_type') and validated.oi_scenario_type:
+                    logger.info(f"  🆕 OI Scenario: {validated.oi_scenario_type}")
                 
-                await self.telegram.send(alert_msg)
-                logger.info("  ✅ Alert sent to Telegram")
+                if not full_warmup:
+                    logger.info(f"  ⚡ EARLY SIGNAL")
+                
+                self.position_tracker.open_position(validated)
+                
+                if self.telegram.is_enabled():
+                    msg = self.formatter.format_entry_signal(validated)
+                    if not full_warmup:
+                        msg = f"⚡ <b>EARLY SIGNAL</b>\n\n" + msg
+                    
+                    if hasattr(validated, 'oi_scenario_type') and validated.oi_scenario_type:
+                        msg += f"\n\n🔥 <b>OI Scenario:</b> {validated.oi_scenario_type}"
+                    
+                    await self.telegram.send_signal(msg)
             else:
-                logger.info("  No signal generated (conditions not met)")
-        else:
-            logger.info(f"  Active position: {active_position['type']} @ {active_position['entry']}")
-            logger.info("  Monitoring for exit...")
+                logger.info(f"  ✋ No valid setup")
+        elif not signal_allowed:
+            logger.info(f"\n⏰ {signal_msg}")
+        elif self.position_tracker.has_active_position():
+            logger.info(f"\n📍 Position active")
 
-
-# ========== MAIN ENTRY POINT ==========
 
 async def main():
-    """Main entry point"""
     bot = NiftyTradingBot()
     await bot.run()
 
