@@ -1,7 +1,6 @@
 """
 NIFTY Trading Bot - Main Orchestrator
-COMPLETE: Monthly futures + Weekly options, 11 strikes fetch + 5 deep analysis
-Live futures price for entry/exit, proper startup notification
+UPGRADED: Price-aware OI analysis, scenario detection, improved accuracy
 """
 
 import asyncio
@@ -15,13 +14,13 @@ from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
-BOT_VERSION = "4.0.0-FINAL"
+BOT_VERSION = "5.0.0-PRICE-AWARE"
 
 logger = setup_logger("main")
 
 
 class NiftyTradingBot:
-    """Main bot orchestrator - PRODUCTION READY"""
+    """Main bot orchestrator - PRICE-AWARE EDITION"""
     
     def __init__(self):
         self.memory = RedisBrain()
@@ -44,7 +43,7 @@ class NiftyTradingBot:
         self.exit_triggered_this_cycle = False
     
     async def initialize(self):
-        """Initialize bot with comprehensive startup notification"""
+        """Initialize bot with startup notification"""
         logger.info("=" * 60)
         logger.info(f"🚀 NIFTY Trading Bot v{BOT_VERSION}")
         logger.info("=" * 60)
@@ -54,16 +53,12 @@ class NiftyTradingBot:
         
         self.data_fetcher = DataFetcher(self.upstox)
         
-        # Get contract details from ACTUAL auto-detection
         weekly_expiry = get_next_weekly_expiry()
-        
-        # Get actual detected futures info
         monthly_expiry = self.upstox.futures_expiry.strftime('%Y-%m-%d') if self.upstox.futures_expiry else "AUTO"
         futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
         
         current_time = format_time_ist(get_ist_time())
         
-        # Calculate deep analysis strikes for display
         example_atm = 24150
         deep_strikes = get_deep_analysis_strikes(example_atm)
         deep_range = f"{deep_strikes[0]}-{deep_strikes[-1]}"
@@ -71,7 +66,29 @@ class NiftyTradingBot:
         fetch_min, fetch_max = get_strike_range_fetch(example_atm)
         
         startup_msg = f"""
-🚀 <b>NIFTY BOT v{BOT_VERSION} STARTED</b>
+🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
+
+━━━━━━━━━━━━━━━━━━━━
+🆕 <b>NEW: PRICE-AWARE OI ANALYSIS</b>
+━━━━━━━━━━━━━━━━━━━━
+
+<b>6 OI Scenarios Detected:</b>
+
+<b>STRONG Signals (Fresh Money):</b>
+1️⃣ CE Long Buildup (OI↑ + Price↑)
+   → Fresh Call buying = STRONG BULLISH
+2️⃣ PE Short Buildup (OI↑ + Price↓)
+   → Fresh Put buying = STRONG BEARISH
+
+<b>WEAK Signals (Profit Booking):</b>
+3️⃣ CE Short Covering (OI↓ + Price↑)
+   → Bears exiting = WEAK BULLISH
+4️⃣ CE Long Unwinding (OI↓ + Price↓)
+   → Bulls exiting = WEAK BEARISH
+5️⃣ PE Short Covering (OI↓ + Price↓)
+   → Bulls exiting puts = WEAK BEARISH
+6️⃣ PE Long Unwinding (OI↓ + Price↑)
+   → Bears exiting = WEAK BULLISH
 
 ━━━━━━━━━━━━━━━━━━━━
 📅 <b>CONTRACT DETAILS</b>
@@ -80,106 +97,90 @@ class NiftyTradingBot:
 <b>Futures (MONTHLY):</b>
 • Contract: {futures_contract}
 • Expiry: {monthly_expiry}
-• Usage: Technical analysis (VWAP, ATR, Volume)
+• Usage: Technical + Price tracking
 
 <b>Options (WEEKLY):</b>
 • Expiry: {weekly_expiry}
-• Usage: Trading instrument + OI analysis
+• Usage: Trading + OI analysis
 
 ━━━━━━━━━━━━━━━━━━━━
 📊 <b>DATA STRATEGY</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>MONTHLY Futures Data:</b>
+<b>MONTHLY Futures:</b>
 ✅ Candles for VWAP/ATR/EMA
-✅ LIVE price for Entry/Exit decisions
-✅ Volume analysis
+✅ LIVE price for decisions
+✅ Price history tracking (NEW!)
 
 <b>Spot Price:</b>
-✅ ATM strike calculation only
+✅ ATM calculation only
 
-<b>WEEKLY Option Chain:</b>
+<b>WEEKLY Options:</b>
 ✅ Fetch: 11 strikes (ATM ± 5)
-   Range: {fetch_min} to {fetch_max}
-✅ Deep Analysis: 5 strikes (ATM ± 2)
-   Range: {deep_range}
-✅ Total OI: All 11 strikes
-✅ Unwinding Analysis: 5 deep strikes
+✅ Deep: 5 strikes (ATM ± 2)
+✅ Total OI + Price context (NEW!)
 
 ━━━━━━━━━━━━━━━━━━━━
 🔧 <b>TIMING &amp; WARMUP</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-• Market Opens: 9:15 AM (ignored - freak trades)
-• First Data: 9:16 AM (base reference)
-• Early Signals: 9:21 AM (confidence ≥ 85%)
-• Full Signals: 9:31 AM (confidence ≥ 70%)
-• Signal Window: 9:21 AM - 3:15 PM
-• Warmup Period: {WARMUP_MINUTES} min from first snapshot
-• Scan Interval: {SCAN_INTERVAL}s
-• Memory TTL: {MEMORY_TTL_HOURS}h (auto-cleanup)
+• First Data: 9:16 AM
+• Early Signals: 9:21 AM (≥85%)
+• Full Signals: 9:31 AM (≥70%)
+• Signal Window: 9:21-3:15 PM
+• Warmup: {WARMUP_MINUTES} min
+• Scan: {SCAN_INTERVAL}s
 
 ━━━━━━━━━━━━━━━━━━━━
-⚙️ <b>OI THRESHOLDS (STRICT)</b>
+⚙️ <b>OI THRESHOLDS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Entry Requirements (AND Logic):</b>
-• 5m OI Unwinding: &lt; -{MIN_OI_5M_FOR_ENTRY}%
-• 15m OI Unwinding: &lt; -{MIN_OI_15M_FOR_ENTRY}%
-• BOTH timeframes must show unwinding
-• ATM OI Threshold: &lt; -{ATM_OI_THRESHOLD}%
-• Volume Spike: ≥ {VOL_SPIKE_MULTIPLIER}x average
+<b>Entry (AND Logic):</b>
+• 5m OI: &lt; -{MIN_OI_5M_FOR_ENTRY}%
+• 15m OI: &lt; -{MIN_OI_15M_FOR_ENTRY}%
+• Price Change: Tracked every scan
+• Scenario: Auto-detected
 
 <b>Strong Signal:</b>
-• 5m OI: &lt; -{STRONG_OI_5M_THRESHOLD}%
-• 15m OI: &lt; -{STRONG_OI_15M_THRESHOLD}%
+• 5m: &lt; -{STRONG_OI_5M_THRESHOLD}%
+• 15m: &lt; -{STRONG_OI_15M_THRESHOLD}%
+• Fresh buildup detected
 
 ━━━━━━━━━━━━━━━━━━━━
 🎯 <b>RISK MANAGEMENT</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 • Premium SL: {PREMIUM_SL_PERCENT}%
-• Trailing SL: {'Enabled' if ENABLE_TRAILING_SL else 'Disabled'}
-• Trailing Distance: {int(TRAILING_SL_DISTANCE * 100)}%
-• Signal Cooldown: {SIGNAL_COOLDOWN_SECONDS}s
+• Trailing SL: {'ON' if ENABLE_TRAILING_SL else 'OFF'}
 • Min Confidence: {MIN_CONFIDENCE}%
-• Min Primary Checks: {MIN_PRIMARY_CHECKS}/3
+• Signal Cooldown: {SIGNAL_COOLDOWN_SECONDS}s
 
 <b>Exit Protection:</b>
-• Min Hold Time: {MIN_HOLD_TIME_MINUTES} min
+• Min Hold: {MIN_HOLD_TIME_MINUTES} min
 • OI Exit Hold: {MIN_HOLD_BEFORE_OI_EXIT} min
-• OI Reversal: {EXIT_OI_REVERSAL_THRESHOLD}% sustained
-• Volume Dry: &lt; {EXIT_VOLUME_DRY_THRESHOLD}x
-• Premium Drop: {EXIT_PREMIUM_DROP_PERCENT}% from peak
-
-<b>Re-Entry Protection:</b>
-• Same Strike Cooldown: {SAME_STRIKE_COOLDOWN_MINUTES} min
-• Opposite Signal Gap: {OPPOSITE_SIGNAL_COOLDOWN_MINUTES} min
-• Same Direction Gap: {SAME_DIRECTION_COOLDOWN_MINUTES} min
+• OI Reversal: {EXIT_OI_REVERSAL_THRESHOLD}%
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 <b>TECHNICAL SETTINGS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 • ATR Period: {ATR_PERIOD}
-• ATR Target Multiple: {ATR_TARGET_MULTIPLIER}x
-• ATR SL Multiple: {ATR_SL_MULTIPLIER}x
+• ATR Target: {ATR_TARGET_MULTIPLIER}x
 • VWAP Buffer: {VWAP_BUFFER} pts
-• VWAP Strict Mode: {'ON' if VWAP_STRICT_MODE else 'OFF'}
 • PCR Bullish: &gt; {PCR_BULLISH}
 • PCR Bearish: &lt; {PCR_BEARISH}
 
 ━━━━━━━━━━━━━━━━━━━━
-⏰ Bot started at {current_time}
+⏰ Started at {current_time}
 """
         
         if self.telegram.is_enabled():
             await self.telegram.send(startup_msg)
         
-        logger.info("✅ Bot initialized successfully")
-        logger.info(f"📅 Monthly Futures: {futures_contract} (Expiry: {monthly_expiry})")
-        logger.info(f"📅 Weekly Options: {weekly_expiry}")
-        logger.info(f"📊 Strike Strategy: Fetch 11, Analyze 5 deep")
+        logger.info("✅ Bot initialized (PRICE-AWARE)")
+        logger.info(f"📅 Monthly: {futures_contract}")
+        logger.info(f"📅 Weekly: {weekly_expiry}")
+        logger.info(f"🆕 Price tracking: ENABLED")
         logger.info("=" * 60)
     
     async def shutdown(self):
@@ -213,7 +214,7 @@ class NiftyTradingBot:
             await self.shutdown()
     
     async def _cycle(self):
-        """Single scan cycle"""
+        """Single scan cycle with PRICE-AWARE OI analysis"""
         now = get_ist_time()
         status, _ = get_market_status()
         current_time = now.time()
@@ -234,62 +235,63 @@ class NiftyTradingBot:
             return
         
         if current_time >= time(9, 15) and current_time < time(9, 16):
-            logger.info("⏭️ Skipping 9:15 AM (freak trade prevention)")
+            logger.info("⏭️ Skipping 9:15 AM")
             return
         
         logger.info("📥 Fetching market data...")
         
-        # ========== STEP 1: FETCH ALL DATA ==========
+        # ========== FETCH DATA ==========
         
-        # Fetch spot (for ATM calculation)
         spot = await self.data_fetcher.fetch_spot()
         if not validate_price(spot):
-            logger.error("❌ STOP: Spot validation failed")
+            logger.error("❌ Spot validation failed")
             return
         logger.info(f"  ✅ Spot: ₹{spot:.2f}")
         
-        # Fetch MONTHLY futures candles (for technical analysis)
         futures_df = await self.data_fetcher.fetch_futures_candles()
         if not validate_candle_data(futures_df):
-            logger.error("❌ STOP: Futures candles validation failed")
+            logger.error("❌ Futures candles validation failed")
             return
-        logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars (for VWAP/ATR)")
+        logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars")
         
-        # Fetch MONTHLY futures LIVE price (for entry/exit)
         futures_ltp = await self.data_fetcher.fetch_futures_ltp()
         if not validate_price(futures_ltp):
-            logger.error("❌ STOP: Live Futures price validation failed")
+            logger.error("❌ Live Futures price validation failed")
             return
-        logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f} (REAL-TIME)")
+        logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f}")
         
-        # Compare candle close vs live price
-        candle_close = futures_df['close'].iloc[-1]
-        price_diff = futures_ltp - candle_close
-        logger.info(f"  📊 Price Check: Candle={candle_close:.2f}, Live={futures_ltp:.2f}, Diff={price_diff:+.2f}")
+        # 🆕 SAVE PRICE & GET CHANGE
+        self.memory.save_price(futures_ltp)
         
-        # Fetch WEEKLY option chain (11 strikes)
+        price_5m, has_price_5m = self.memory.get_price_change(5)
+        price_15m, has_price_15m = self.memory.get_price_change(15)
+        price_stats = self.memory.get_price_stats()
+        
+        logger.info(f"  🆕 Price Changes:")
+        logger.info(f"     5m:  {price_5m:+.2f}% {'✅' if has_price_5m else '⏳'}")
+        logger.info(f"     15m: {price_15m:+.2f}% {'✅' if has_price_15m else '⏳'}")
+        logger.info(f"     From Open: {price_stats['change_from_open']:+.2f}%")
+        
         option_result = await self.data_fetcher.fetch_option_chain(spot)
         if not option_result:
-            logger.error("❌ STOP: Option chain returned None")
+            logger.error("❌ Option chain returned None")
             return
         
         atm, strike_data = option_result
         if not validate_strike_data(strike_data):
-            logger.error(f"❌ STOP: Strike validation failed")
+            logger.error(f"❌ Strike validation failed")
             return
         
-        # Get deep analysis strikes
         deep_strikes = get_deep_analysis_strikes(atm)
         logger.info(f"  ✅ Strikes: {len(strike_data)} total (ATM {atm})")
-        logger.info(f"  🔍 Deep Analysis: {len(deep_strikes)} strikes {deep_strikes[0]}-{deep_strikes[-1]}")
+        logger.info(f"  🔍 Deep: {len(deep_strikes)} strikes")
         
-        # Use LIVE price for all decisions
         futures_price = futures_ltp
-        logger.info(f"\n💹 Prices: Spot={spot:.2f}, Futures(LIVE)={futures_price:.2f}, ATM={atm}")
+        logger.info(f"\n💹 Prices: Spot={spot:.2f}, Futures={futures_price:.2f}, ATM={atm}")
         
-        # ========== STEP 2: SAVE OI SNAPSHOTS (ALL 11 STRIKES) ==========
+        # ========== SAVE OI SNAPSHOTS ==========
         
-        logger.info("🔄 Saving OI snapshots (11 strikes)...")
+        logger.info("🔄 Saving OI snapshots...")
         total_ce, total_pe = self.oi_analyzer.calculate_total_oi(strike_data)
         deep_ce, deep_pe, _ = self.oi_analyzer.calculate_deep_analysis_oi(strike_data, atm)
         
@@ -298,10 +300,10 @@ class NiftyTradingBot:
         for strike, data in strike_data.items():
             self.memory.save_strike(strike, data)
         
-        logger.info(f"  ✅ Total OI (11 strikes): CE={total_ce:,.0f}, PE={total_pe:,.0f}")
-        logger.info(f"  🔍 Deep OI (5 strikes): CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
+        logger.info(f"  ✅ Total OI: CE={total_ce:,.0f}, PE={total_pe:,.0f}")
+        logger.info(f"  🔍 Deep OI: CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
         
-        # ========== STEP 3: CALCULATE OI CHANGES ==========
+        # ========== CALCULATE OI CHANGES ==========
         
         logger.info("📊 Calculating OI changes...")
         
@@ -324,13 +326,53 @@ class NiftyTradingBot:
         
         logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
         logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-        logger.info(f"  ATM {atm}: CE={atm_info['ce_change_pct']:+.1f}% PE={atm_info['pe_change_pct']:+.1f}%")
+        logger.info(f"  ATM: CE={atm_info['ce_change_pct']:+.1f}% PE={atm_info['pe_change_pct']:+.1f}%")
         
         self.previous_strike_data = strike_data.copy()
         
-        # ========== STEP 4: RUN ANALYSIS ==========
+        # ========== 🆕 PRICE-AWARE OI ANALYSIS ==========
         
-        logger.info("🔍 Running technical analysis...")
+        logger.info("\n🔥 PRICE-AWARE OI ANALYSIS:")
+        
+        # Use 5m price change for analysis (more responsive)
+        oi_scenario = self.oi_analyzer.analyze_oi_with_price(
+            ce_5m=ce_5m,
+            ce_15m=ce_15m,
+            pe_5m=pe_5m,
+            pe_15m=pe_15m,
+            price_change_pct=price_5m if has_price_5m else 0.0
+        )
+        
+        logger.info(f"  📊 Primary Direction: {oi_scenario['primary_direction']}")
+        logger.info(f"  🎯 Confidence Boost: {oi_scenario['confidence_boost']:+d}%")
+        
+        # CE Scenario
+        if oi_scenario['ce_scenario']:
+            ce_detail = oi_scenario['details'].get('ce', {})
+            logger.info(f"\n  📞 CE SCENARIO: {oi_scenario['ce_scenario']}")
+            logger.info(f"     Signal: {oi_scenario['ce_signal']}")
+            logger.info(f"     Strength: {oi_scenario['ce_strength']}")
+            logger.info(f"     Type: {ce_detail.get('type', 'N/A')}")
+            logger.info(f"     Meaning: {ce_detail.get('meaning', 'N/A')}")
+            logger.info(f"     Action: {ce_detail.get('action', 'N/A')}")
+            if ce_detail.get('warning'):
+                logger.warning(f"     ⚠️ {ce_detail['warning']}")
+        
+        # PE Scenario
+        if oi_scenario['pe_scenario']:
+            pe_detail = oi_scenario['details'].get('pe', {})
+            logger.info(f"\n  📞 PE SCENARIO: {oi_scenario['pe_scenario']}")
+            logger.info(f"     Signal: {oi_scenario['pe_signal']}")
+            logger.info(f"     Strength: {oi_scenario['pe_strength']}")
+            logger.info(f"     Type: {pe_detail.get('type', 'N/A')}")
+            logger.info(f"     Meaning: {pe_detail.get('meaning', 'N/A')}")
+            logger.info(f"     Action: {pe_detail.get('action', 'N/A')}")
+            if pe_detail.get('warning'):
+                logger.warning(f"     ⚠️ {pe_detail['warning']}")
+        
+        # ========== TECHNICAL ANALYSIS ==========
+        
+        logger.info("\n🔍 Running technical analysis...")
         
         pcr = self.oi_analyzer.calculate_pcr(total_pe, total_ce)
         vwap = self.technical_analyzer.calculate_vwap(futures_df)
@@ -355,44 +397,40 @@ class NiftyTradingBot:
         else:
             oi_strength = 'weak'
         
-        logger.info(f"\n📊 ANALYSIS COMPLETE:")
-        logger.info(f"  📈 PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
-        logger.info(f"  📍 Price vs VWAP: {vwap_dist:+.1f} pts (LIVE price)")
-        logger.info(f"  🔄 OI Changes (Total - 11 strikes):")
-        logger.info(f"     5m:  CE {ce_5m:+.1f}% | PE {pe_5m:+.1f}%")
-        logger.info(f"     15m: CE {ce_15m:+.1f}% | PE {pe_15m:+.1f}% (Strength: {oi_strength})")
-        logger.info(f"  📊 Volume: {vol_ratio:.1f}x {'🔥SPIKE' if vol_spike else ''}")
-        logger.info(f"  💨 Flow: {order_flow:.2f}, Momentum: {momentum['direction']}")
-        logger.info(f"  🎯 Gamma Zone: {gamma}")
+        logger.info(f"\n📊 TECHNICAL SUMMARY:")
+        logger.info(f"  PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
+        logger.info(f"  Price vs VWAP: {vwap_dist:+.1f} pts")
+        logger.info(f"  Volume: {vol_ratio:.1f}x {'🔥SPIKE' if vol_spike else ''}")
+        logger.info(f"  Flow: {order_flow:.2f}, Momentum: {momentum['direction']}")
+        logger.info(f"  OI Strength: {oi_strength}")
         
-        # ========== STEP 5: CHECK WARMUP ==========
+        # ========== WARMUP CHECK ==========
         
         stats = self.memory.get_stats()
         logger.info(f"\n⏱️  WARMUP STATUS:")
         if stats['first_snapshot_time']:
-            logger.info(f"  Base Time: {stats['first_snapshot_time'].strftime('%H:%M')}")
+            logger.info(f"  Base: {stats['first_snapshot_time'].strftime('%H:%M')}")
         logger.info(f"  Elapsed: {stats['elapsed_minutes']:.1f} min")
-        logger.info(f"  5m Ready: {'✅' if stats['warmed_up_5m'] else '⏳'}")
-        logger.info(f"  10m Ready: {'✅' if stats['warmed_up_10m'] else '⏳'}")
-        logger.info(f"  15m Ready: {'✅' if stats['warmed_up_15m'] else '⏳'}")
+        logger.info(f"  5m: {'✅' if stats['warmed_up_5m'] else '⏳'}")
+        logger.info(f"  15m: {'✅' if stats['warmed_up_15m'] else '⏳'}")
         
         full_warmup = stats['warmed_up_15m']
         early_warmup = stats['warmed_up_5m'] and stats['elapsed_minutes'] >= 5
         
         if not full_warmup and not early_warmup:
             remaining = WARMUP_MINUTES - stats['elapsed_minutes']
-            logger.info(f"\n🚫 SIGNALS BLOCKED - Warmup: {remaining:.1f} min remaining")
+            logger.info(f"\n🚫 SIGNALS BLOCKED - {remaining:.1f} min remaining")
             return
         
         if full_warmup:
-            logger.info(f"\n✅ FULL WARMUP COMPLETE - All signals active!")
+            logger.info(f"\n✅ FULL WARMUP COMPLETE")
         else:
-            logger.info(f"\n⚡ EARLY WARMUP READY - High confidence signals only!")
+            logger.info(f"\n⚡ EARLY WARMUP READY")
         
-        # ========== STEP 6: CHECK EXIT CONDITIONS ==========
+        # ========== EXIT CHECK ==========
         
         if self.position_tracker.has_active_position():
-            logger.info(f"📍 Active position exists - checking exit...")
+            logger.info(f"📍 Checking exit conditions...")
             
             current_data = {
                 'ce_oi_5m': ce_5m,
@@ -412,7 +450,7 @@ class NiftyTradingBot:
                     if self.telegram.is_enabled():
                         msg = f"🔒 <b>TRAILING SL UPDATED</b>\n\n{details}"
                         await self.telegram.send_update(msg)
-                    logger.info(f"📢 Trailing SL updated: {details}")
+                    logger.info(f"📢 Trailing SL: {details}")
                 
                 elif should_exit:
                     exit_premium = self.position_tracker._estimate_premium(current_data, 
@@ -432,22 +470,22 @@ class NiftyTradingBot:
                         )
                         await self.telegram.send_exit(msg)
                     
-                    logger.info(f"🚪 EXIT TRIGGERED: {reason} - {details}")
+                    logger.info(f"🚪 EXIT: {reason} - {details}")
                     self.exit_triggered_this_cycle = True
             else:
-                logger.info(f"✅ Position holding - no exit conditions met")
+                logger.info(f"✅ Position holding")
         
-        # ========== STEP 7: GENERATE ENTRY SIGNAL ==========
+        # ========== ENTRY SIGNAL ==========
         
         if self.exit_triggered_this_cycle:
-            logger.info(f"\n⏸️ EXIT TRIGGERED THIS CYCLE - Skipping entry check")
+            logger.info(f"\n⏸️ EXIT triggered - skipping entry")
             return
         
         signal_allowed, signal_msg = is_signal_time(warmup_complete=full_warmup or early_warmup)
         
         if not self.position_tracker.has_active_position() and signal_allowed:
             logger.info(f"\n🔎 SIGNAL GENERATION:")
-            logger.info(f"  No active position - checking for entry...")
+            logger.info(f"  Checking for entry...")
             
             signal = self.signal_gen.generate(
                 spot_price=spot, 
@@ -477,12 +515,13 @@ class NiftyTradingBot:
                 gamma_zone=gamma, 
                 momentum=momentum,
                 multi_tf=unwinding['multi_timeframe'],
-                oi_strength=oi_strength
+                oi_strength=oi_strength,
+                oi_scenario=oi_scenario  # 🆕 Pass OI scenario
             )
             
             if not full_warmup and signal:
                 if signal.confidence < EARLY_SIGNAL_CONFIDENCE:
-                    logger.info(f"  ⚡ Early signal {signal.confidence}% < {EARLY_SIGNAL_CONFIDENCE}% threshold")
+                    logger.info(f"  ⚡ Early signal {signal.confidence}% < {EARLY_SIGNAL_CONFIDENCE}%")
                     signal = None
             
             validated = self.signal_validator.validate(signal)
@@ -490,26 +529,36 @@ class NiftyTradingBot:
             if validated:
                 logger.info(f"\n🔔 SIGNAL GENERATED!")
                 logger.info(f"  Type: {validated.signal_type.value}")
-                logger.info(f"  Entry: ₹{validated.entry_price:.2f} (LIVE PRICE)")
+                logger.info(f"  Entry: ₹{validated.entry_price:.2f}")
                 logger.info(f"  Confidence: {validated.confidence}%")
                 logger.info(f"  VWAP Score: {validated.vwap_score}/100")
                 logger.info(f"  OI Strength: {validated.oi_strength}")
+                
+                # 🆕 Log OI scenario
+                if hasattr(validated, 'oi_scenario_type'):
+                    logger.info(f"  🆕 OI Scenario: {validated.oi_scenario_type}")
+                
                 if not full_warmup:
-                    logger.info(f"  ⚡ EARLY SIGNAL (High Confidence)")
+                    logger.info(f"  ⚡ EARLY SIGNAL")
                 
                 self.position_tracker.open_position(validated)
                 
                 if self.telegram.is_enabled():
                     msg = self.formatter.format_entry_signal(validated)
                     if not full_warmup:
-                        msg = f"⚡ <b>EARLY SIGNAL</b> (High Confidence)\n\n" + msg
+                        msg = f"⚡ <b>EARLY SIGNAL</b>\n\n" + msg
+                    
+                    # 🆕 Add OI scenario to message
+                    if hasattr(validated, 'oi_scenario_type'):
+                        msg += f"\n\n🔥 <b>OI Scenario:</b> {validated.oi_scenario_type}"
+                    
                     await self.telegram.send_signal(msg)
             else:
-                logger.info(f"  ✋ No valid setup found")
+                logger.info(f"  ✋ No valid setup")
         elif not signal_allowed:
             logger.info(f"\n⏰ {signal_msg}")
         elif self.position_tracker.has_active_position():
-            logger.info(f"\n📍 Position already active - not generating new signals")
+            logger.info(f"\n📍 Position active")
 
 
 async def main():
