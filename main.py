@@ -1,6 +1,6 @@
 """
 NIFTY Trading Bot - Main Orchestrator
-UPGRADED: Price-aware OI analysis, scenario detection, improved accuracy
+FIXED: ATM OI bug, VWAP validation, volume calculation
 """
 
 import asyncio
@@ -14,13 +14,13 @@ from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
-BOT_VERSION = "5.0.0-PRICE-AWARE"
+BOT_VERSION = "5.1.0-FIXED"
 
 logger = setup_logger("main")
 
 
 class NiftyTradingBot:
-    """Main bot orchestrator - PRICE-AWARE EDITION"""
+    """Main bot orchestrator - FIXED EDITION"""
     
     def __init__(self):
         self.memory = RedisBrain()
@@ -39,7 +39,6 @@ class NiftyTradingBot:
         self.telegram = TelegramBot()
         self.formatter = MessageFormatter()
         
-        self.previous_strike_data = None
         self.exit_triggered_this_cycle = False
     
     async def initialize(self):
@@ -69,26 +68,29 @@ class NiftyTradingBot:
 🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
 ━━━━━━━━━━━━━━━━━━━━
-🆕 <b>NEW: PRICE-AWARE OI ANALYSIS</b>
+🔧 <b>BUG FIXES IN THIS VERSION</b>
+━━━━━━━━━━━━━━━━━━━━
+
+✅ ATM OI 0.0% bug FIXED
+✅ VWAP validation strengthened
+✅ Volume calculation improved
+✅ PE_BUY direction validation
+
+━━━━━━━━━━━━━━━━━━━━
+🆕 <b>PRICE-AWARE OI ANALYSIS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 <b>6 OI Scenarios Detected:</b>
 
 <b>STRONG Signals (Fresh Money):</b>
 1️⃣ CE Long Buildup (OI↑ + Price↑)
-   → Fresh Call buying = STRONG BULLISH
 2️⃣ PE Short Buildup (OI↑ + Price↓)
-   → Fresh Put buying = STRONG BEARISH
 
 <b>WEAK Signals (Profit Booking):</b>
 3️⃣ CE Short Covering (OI↓ + Price↑)
-   → Bears exiting = WEAK BULLISH
 4️⃣ CE Long Unwinding (OI↓ + Price↓)
-   → Bulls exiting = WEAK BEARISH
 5️⃣ PE Short Covering (OI↓ + Price↓)
-   → Bulls exiting puts = WEAK BEARISH
 6️⃣ PE Long Unwinding (OI↓ + Price↑)
-   → Bears exiting = WEAK BULLISH
 
 ━━━━━━━━━━━━━━━━━━━━
 📅 <b>CONTRACT DETAILS</b>
@@ -97,11 +99,9 @@ class NiftyTradingBot:
 <b>Futures (MONTHLY):</b>
 • Contract: {futures_contract}
 • Expiry: {monthly_expiry}
-• Usage: Technical + Price tracking
 
 <b>Options (WEEKLY):</b>
 • Expiry: {weekly_expiry}
-• Usage: Trading + OI analysis
 
 ━━━━━━━━━━━━━━━━━━━━
 📊 <b>DATA STRATEGY</b>
@@ -110,15 +110,12 @@ class NiftyTradingBot:
 <b>MONTHLY Futures:</b>
 ✅ Candles for VWAP/ATR/EMA
 ✅ LIVE price for decisions
-✅ Price history tracking (NEW!)
-
-<b>Spot Price:</b>
-✅ ATM calculation only
+✅ Price history tracking
 
 <b>WEEKLY Options:</b>
 ✅ Fetch: 11 strikes (ATM ± 5)
 ✅ Deep: 5 strikes (ATM ± 2)
-✅ Total OI + Price context (NEW!)
+✅ Total OI + Price context
 
 ━━━━━━━━━━━━━━━━━━━━
 🔧 <b>TIMING &amp; WARMUP</b>
@@ -127,7 +124,6 @@ class NiftyTradingBot:
 • First Data: 9:16 AM
 • Early Signals: 9:21 AM (≥85%)
 • Full Signals: 9:31 AM (≥70%)
-• Signal Window: 9:21-3:15 PM
 • Warmup: {WARMUP_MINUTES} min
 • Scan: {SCAN_INTERVAL}s
 
@@ -135,16 +131,13 @@ class NiftyTradingBot:
 ⚙️ <b>OI THRESHOLDS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Entry (AND Logic):</b>
+<b>Entry:</b>
 • 5m OI: &lt; -{MIN_OI_5M_FOR_ENTRY}%
 • 15m OI: &lt; -{MIN_OI_15M_FOR_ENTRY}%
-• Price Change: Tracked every scan
-• Scenario: Auto-detected
 
-<b>Strong Signal:</b>
+<b>Strong:</b>
 • 5m: &lt; -{STRONG_OI_5M_THRESHOLD}%
 • 15m: &lt; -{STRONG_OI_15M_THRESHOLD}%
-• Fresh buildup detected
 
 ━━━━━━━━━━━━━━━━━━━━
 🎯 <b>RISK MANAGEMENT</b>
@@ -153,22 +146,6 @@ class NiftyTradingBot:
 • Premium SL: {PREMIUM_SL_PERCENT}%
 • Trailing SL: {'ON' if ENABLE_TRAILING_SL else 'OFF'}
 • Min Confidence: {MIN_CONFIDENCE}%
-• Signal Cooldown: {SIGNAL_COOLDOWN_SECONDS}s
-
-<b>Exit Protection:</b>
-• Min Hold: {MIN_HOLD_TIME_MINUTES} min
-• OI Exit Hold: {MIN_HOLD_BEFORE_OI_EXIT} min
-• OI Reversal: {EXIT_OI_REVERSAL_THRESHOLD}%
-
-━━━━━━━━━━━━━━━━━━━━
-📈 <b>TECHNICAL SETTINGS</b>
-━━━━━━━━━━━━━━━━━━━━
-
-• ATR Period: {ATR_PERIOD}
-• ATR Target: {ATR_TARGET_MULTIPLIER}x
-• VWAP Buffer: {VWAP_BUFFER} pts
-• PCR Bullish: &gt; {PCR_BULLISH}
-• PCR Bearish: &lt; {PCR_BEARISH}
 
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Started at {current_time}
@@ -177,10 +154,9 @@ class NiftyTradingBot:
         if self.telegram.is_enabled():
             await self.telegram.send(startup_msg)
         
-        logger.info("✅ Bot initialized (PRICE-AWARE)")
+        logger.info("✅ Bot initialized (FIXED)")
         logger.info(f"📅 Monthly: {futures_contract}")
         logger.info(f"📅 Weekly: {weekly_expiry}")
-        logger.info(f"🆕 Price tracking: ENABLED")
         logger.info("=" * 60)
     
     async def shutdown(self):
@@ -214,7 +190,7 @@ class NiftyTradingBot:
             await self.shutdown()
     
     async def _cycle(self):
-        """Single scan cycle with PRICE-AWARE OI analysis"""
+        """Single scan cycle - FIXED VERSION"""
         now = get_ist_time()
         status, _ = get_market_status()
         current_time = now.time()
@@ -260,7 +236,7 @@ class NiftyTradingBot:
             return
         logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f}")
         
-        # 🆕 SAVE PRICE & GET CHANGE
+        # Save price & get change
         self.memory.save_price(futures_ltp)
         
         price_5m, has_price_5m = self.memory.get_price_change(5)
@@ -303,38 +279,26 @@ class NiftyTradingBot:
         logger.info(f"  ✅ Total OI: CE={total_ce:,.0f}, PE={total_pe:,.0f}")
         logger.info(f"  🔍 Deep OI: CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
         
-        # ========== CALCULATE OI CHANGES ==========
+        # ========== 🔧 FIX #1: ATM OI CALCULATION ==========
         
         logger.info("📊 Calculating OI changes...")
         
         ce_5m, pe_5m, has_5m = self.memory.get_total_oi_change(total_ce, total_pe, 5)
         ce_15m, pe_15m, has_15m = self.memory.get_total_oi_change(total_ce, total_pe, 15)
         
-        atm_info = self.oi_analyzer.get_atm_oi_changes(
-            strike_data, 
-            atm, 
-            self.previous_strike_data
-        )
-        
+        # 🔧 FIX: Use Redis memory for ATM OI changes
         atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
         atm_ce_5m, atm_pe_5m, has_atm_5m = self.memory.get_strike_oi_change(atm, atm_data, 5)
         atm_ce_15m, atm_pe_15m, has_atm_15m = self.memory.get_strike_oi_change(atm, atm_data, 15)
         
-        if not atm_info['has_previous_data']:
-            atm_info['ce_change_pct'] = atm_ce_15m
-            atm_info['pe_change_pct'] = atm_pe_15m
-        
         logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
         logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-        logger.info(f"  ATM: CE={atm_info['ce_change_pct']:+.1f}% PE={atm_info['pe_change_pct']:+.1f}%")
+        logger.info(f"  ATM: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_atm_15m else '⏳'}")
         
-        self.previous_strike_data = strike_data.copy()
-        
-        # ========== 🆕 PRICE-AWARE OI ANALYSIS ==========
+        # ========== PRICE-AWARE OI ANALYSIS ==========
         
         logger.info("\n🔥 PRICE-AWARE OI ANALYSIS:")
         
-        # Use 5m price change for analysis (more responsive)
         oi_scenario = self.oi_analyzer.analyze_oi_with_price(
             ce_5m=ce_5m,
             ce_15m=ce_15m,
@@ -346,27 +310,15 @@ class NiftyTradingBot:
         logger.info(f"  📊 Primary Direction: {oi_scenario['primary_direction']}")
         logger.info(f"  🎯 Confidence Boost: {oi_scenario['confidence_boost']:+d}%")
         
-        # CE Scenario
         if oi_scenario['ce_scenario']:
             ce_detail = oi_scenario['details'].get('ce', {})
-            logger.info(f"\n  📞 CE SCENARIO: {oi_scenario['ce_scenario']}")
-            logger.info(f"     Signal: {oi_scenario['ce_signal']}")
-            logger.info(f"     Strength: {oi_scenario['ce_strength']}")
-            logger.info(f"     Type: {ce_detail.get('type', 'N/A')}")
-            logger.info(f"     Meaning: {ce_detail.get('meaning', 'N/A')}")
-            logger.info(f"     Action: {ce_detail.get('action', 'N/A')}")
+            logger.info(f"\n  📞 CE: {oi_scenario['ce_scenario']} ({oi_scenario['ce_signal']})")
             if ce_detail.get('warning'):
                 logger.warning(f"     ⚠️ {ce_detail['warning']}")
         
-        # PE Scenario
         if oi_scenario['pe_scenario']:
             pe_detail = oi_scenario['details'].get('pe', {})
-            logger.info(f"\n  📞 PE SCENARIO: {oi_scenario['pe_scenario']}")
-            logger.info(f"     Signal: {oi_scenario['pe_signal']}")
-            logger.info(f"     Strength: {oi_scenario['pe_strength']}")
-            logger.info(f"     Type: {pe_detail.get('type', 'N/A')}")
-            logger.info(f"     Meaning: {pe_detail.get('meaning', 'N/A')}")
-            logger.info(f"     Action: {pe_detail.get('action', 'N/A')}")
+            logger.info(f"  📞 PE: {oi_scenario['pe_scenario']} ({oi_scenario['pe_signal']})")
             if pe_detail.get('warning'):
                 logger.warning(f"     ⚠️ {pe_detail['warning']}")
         
@@ -500,13 +452,13 @@ class NiftyTradingBot:
                 pe_total_5m=pe_5m,
                 ce_total_15m=ce_15m, 
                 pe_total_15m=pe_15m,
-                atm_ce_5m=atm_info['ce_change_pct'], 
-                atm_pe_5m=atm_info['pe_change_pct'],
+                atm_ce_5m=atm_ce_5m, 
+                atm_pe_5m=atm_pe_5m,
                 atm_ce_15m=atm_ce_15m, 
                 atm_pe_15m=atm_pe_15m,
                 has_5m_total=has_5m, 
                 has_15m_total=has_15m,
-                has_5m_atm=has_atm_5m or atm_info['has_previous_data'], 
+                has_5m_atm=has_atm_5m, 
                 has_15m_atm=has_atm_15m,
                 volume_spike=vol_spike, 
                 volume_ratio=vol_ratio,
@@ -516,7 +468,7 @@ class NiftyTradingBot:
                 momentum=momentum,
                 multi_tf=unwinding['multi_timeframe'],
                 oi_strength=oi_strength,
-                oi_scenario=oi_scenario  # 🆕 Pass OI scenario
+                oi_scenario=oi_scenario
             )
             
             if not full_warmup and signal:
@@ -534,8 +486,7 @@ class NiftyTradingBot:
                 logger.info(f"  VWAP Score: {validated.vwap_score}/100")
                 logger.info(f"  OI Strength: {validated.oi_strength}")
                 
-                # 🆕 Log OI scenario
-                if hasattr(validated, 'oi_scenario_type'):
+                if hasattr(validated, 'oi_scenario_type') and validated.oi_scenario_type:
                     logger.info(f"  🆕 OI Scenario: {validated.oi_scenario_type}")
                 
                 if not full_warmup:
@@ -548,8 +499,7 @@ class NiftyTradingBot:
                     if not full_warmup:
                         msg = f"⚡ <b>EARLY SIGNAL</b>\n\n" + msg
                     
-                    # 🆕 Add OI scenario to message
-                    if hasattr(validated, 'oi_scenario_type'):
+                    if hasattr(validated, 'oi_scenario_type') and validated.oi_scenario_type:
                         msg += f"\n\n🔥 <b>OI Scenario:</b> {validated.oi_scenario_type}"
                     
                     await self.telegram.send_signal(msg)
