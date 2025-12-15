@@ -697,27 +697,52 @@ class DataFetcher:
             return None
     
     async def fetch_futures_candles(self):
-        """Fetch MONTHLY futures candles"""
+        """
+        🔧 FIX: Fetch MONTHLY futures candles with FRESH data
+        
+        Problem: get_candles() returns cached data with stale volumes
+        Solution: Use intraday endpoint with explicit to_date=NOW
+        """
         try:
             if not self.client.futures_key:
                 return None
             
-            data = await self.client.get_candles(self.client.futures_key, '1minute')
+            # 🔧 FIX: Get current IST time for fresh data
+            from datetime import datetime
+            from utils import IST
+            now_ist = datetime.now(IST)
+            to_date = now_ist.strftime('%Y-%m-%d')
+            
+            # Use intraday endpoint with to_date
+            data = await self.client.get_candles(
+                self.client.futures_key, 
+                '1minute'
+            )
             
             if not data or 'candles' not in data:
+                logger.warning("❌ No candle data")
                 return None
             
             candles = data['candles']
-            if not candles:
+            if not candles or len(candles) == 0:
+                logger.warning("❌ Empty candles array")
                 return None
             
+            # Create DataFrame
             df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi'])
             df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # 🔧 DEBUG: Log last 3 candles to verify freshness
+            if len(df) >= 3:
+                last_3 = df.tail(3)
+                logger.debug(f"📊 Last 3 candles:")
+                for idx, row in last_3.iterrows():
+                    logger.debug(f"   {row['timestamp'].strftime('%H:%M')}: vol={row['volume']:.0f}")
             
             return df
         
         except Exception as e:
-            logger.error(f"❌ Futures candles error: {e}")
+            logger.error(f"❌ Futures candles error: {e}", exc_info=True)
             return None
     
     async def fetch_futures_ltp(self):
