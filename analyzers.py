@@ -374,14 +374,19 @@ class VolumeAnalyzer:
         return round(max(0.2, min(ratio, 5.0)), 2)
     
     @staticmethod
-    def analyze_volume_trend(df, periods=15):
+    def analyze_volume_trend(df, periods=15, futures_ltp=None):
         """
-        🔧 FIX: Volume trend analysis - SKIP incomplete last candle
+        🔧 FINAL FIX: Volume trend with STALE CANDLE DETECTION
         
-        Problem: Upstox returns incomplete current candle with stale volume
-        Solution: Use df[:-1] to skip last bar, take 15-bar average for stability
+        Problem: Upstox API returns last 5-10 candles with CACHED/STALE volume
+        Solution: Validate against LTP and skip stale candles
+        
+        Args:
+            df: Candle DataFrame
+            periods: Number of periods for average
+            futures_ltp: LIVE futures price for validation
         """
-        if df is None or len(df) < periods + 2:
+        if df is None or len(df) < periods + 6:
             return {
                 'trend': 'unknown',
                 'avg_volume': 0,
@@ -390,8 +395,32 @@ class VolumeAnalyzer:
             }
         
         try:
-            # 🔧 KEY FIX: Skip last incomplete candle
-            completed_candles = df[:-1]  # Remove last (incomplete) candle
+            # 🔧 FIX: Detect stale candles using LTP
+            skip_count = 1  # Default: skip last incomplete candle
+            
+            if futures_ltp and len(df) >= 2:
+                last_candle = df.iloc[-1]
+                second_last = df.iloc[-2]
+                
+                # If last candle close is very different from LTP, it's stale
+                price_diff = abs(last_candle['close'] - futures_ltp)
+                
+                if price_diff > 10:  # More than 10 points difference
+                    # Last candle is STALE, check how many candles are stale
+                    for i in range(2, min(11, len(df))):  # Check last 10 candles
+                        candle = df.iloc[-i]
+                        diff = abs(candle['close'] - futures_ltp)
+                        if diff < 5:  # This candle is fresh
+                            skip_count = i
+                            break
+                    else:
+                        skip_count = 10  # All last 10 are stale
+                    
+                    logger.warning(f"⚠️ Stale candles detected! Skipping last {skip_count} candles")
+                    logger.warning(f"   Last close: ₹{last_candle['close']:.2f}, LTP: ₹{futures_ltp:.2f}, Diff: {price_diff:.2f}")
+            
+            # Skip stale candles
+            completed_candles = df[:-skip_count] if skip_count > 0 else df
             
             if len(completed_candles) < periods + 1:
                 return {
@@ -418,7 +447,8 @@ class VolumeAnalyzer:
                 'trend': trend,
                 'avg_volume': round(float(avg), 2),
                 'current_volume': round(float(current), 2),
-                'ratio': round(float(ratio), 2)
+                'ratio': round(float(ratio), 2),
+                'skipped_candles': skip_count
             }
         except Exception as e:
             logger.error(f"❌ Volume trend error: {e}")
@@ -426,7 +456,8 @@ class VolumeAnalyzer:
                 'trend': 'unknown',
                 'avg_volume': 0,
                 'current_volume': 0,
-                'ratio': 1.0
+                'ratio': 1.0,
+                'skipped_candles': 0
             }
 
 
