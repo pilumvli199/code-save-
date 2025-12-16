@@ -270,9 +270,91 @@ class UpstoxClient:
             return None
 
 
-# ==================== Redis Brain ====================
+# ==================== In-Memory OI Tracker ====================
+class InMemoryOITracker:
+    """
+    🆕 In-Memory OI History Tracker - NO REDIS NEEDED!
+    
+    Keeps last 20 scans in RAM for 5m/15m comparison
+    Perfect for intraday trading (data clears daily)
+    """
+    
+    def __init__(self):
+        self.history = []  # [(timestamp, total_ce, total_pe, atm_strike, atm_ce, atm_pe), ...]
+        self.max_history = 20  # Keep 20 minutes of data
+        logger.info("💾 In-Memory OI Tracker initialized (20 scans history)")
+    
+    def save_snapshot(self, total_ce, total_pe, atm_strike, atm_ce_oi, atm_pe_oi):
+        """Save current OI snapshot"""
+        now = datetime.now(IST).replace(second=0, microsecond=0)
+        
+        snapshot = {
+            'timestamp': now,
+            'total_ce': total_ce,
+            'total_pe': total_pe,
+            'atm_strike': atm_strike,
+            'atm_ce': atm_ce_oi,
+            'atm_pe': atm_pe_oi
+        }
+        
+        self.history.append(snapshot)
+        
+        # Keep only last 20
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+        
+        logger.debug(f"💾 Saved snapshot #{len(self.history)}: ATM {atm_strike}, Total CE={total_ce:,}, PE={total_pe:,}")
+    
+    def get_comparison(self, minutes_ago=5):
+        """
+        Get OI from N minutes ago
+        
+        Returns: (total_ce, total_pe, atm_ce, atm_pe, found)
+        """
+        if len(self.history) < 2:
+            return 0, 0, 0, 0, False
+        
+        target_time = datetime.now(IST) - timedelta(minutes=minutes_ago)
+        target_time = target_time.replace(second=0, microsecond=0)
+        
+        # Find closest snapshot (±3 min tolerance)
+        best_match = None
+        min_diff = 999
+        
+        for snapshot in self.history:
+            diff = abs((snapshot['timestamp'] - target_time).total_seconds() / 60)
+            if diff < min_diff and diff <= 3:  # Within 3 minutes
+                min_diff = diff
+                best_match = snapshot
+        
+        if not best_match:
+            return 0, 0, 0, 0, False
+        
+        return (
+            best_match['total_ce'],
+            best_match['total_pe'],
+            best_match['atm_ce'],
+            best_match['atm_pe'],
+            True
+        )
+    
+    def is_ready(self, minutes=5):
+        """Check if we have enough history"""
+        if len(self.history) < 2:
+            return False
+        
+        elapsed = (datetime.now(IST) - self.history[0]['timestamp']).total_seconds() / 60
+        return elapsed >= minutes
+
+
+# ==================== Redis Brain (DEPRECATED - Using In-Memory) ====================
 class RedisBrain:
-    """Memory manager with 24h TTL + PRICE TRACKING"""
+    """
+    🗑️ DEPRECATED: Redis memory manager
+    NOW USING: InMemoryOITracker for OI comparisons
+    
+    Keeping this for price tracking only
+    """
     
     def __init__(self):
         self.client = None
