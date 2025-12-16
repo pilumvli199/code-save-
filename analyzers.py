@@ -1,6 +1,11 @@
 """
-Market Analyzers: OI, Volume, Technical, Market Structure
-FIXED: VWAP validation strengthened for PE_BUY
+Market Analyzers v7.0: COMPREHENSIVE FIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 NEW FEATURES:
+1. OI Velocity Classifier (4 patterns from Image 1)
+2. OTM Strike Analysis (Support/Resistance from Image 3)
+3. Improved scenario naming (human-readable)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import pandas as pd
@@ -13,7 +18,7 @@ logger = setup_logger("analyzers")
 
 # ==================== OI Analyzer ====================
 class OIAnalyzer:
-    """Open Interest analysis WITH PRICE CONTEXT"""
+    """Open Interest analysis with VELOCITY + OTM support"""
     
     @staticmethod
     def calculate_total_oi(strike_data):
@@ -43,7 +48,7 @@ class OIAnalyzer:
     
     @staticmethod
     def calculate_pcr(total_pe, total_ce):
-        """Calculate Put-Call Ratio with neutral default"""
+        """Calculate Put-Call Ratio"""
         if total_ce == 0:
             if total_pe == 0:
                 return 1.0
@@ -54,29 +59,154 @@ class OIAnalyzer:
         return round(min(pcr, 10.0), 2)
     
     @staticmethod
+    def classify_oi_velocity(oi_5m, oi_15m, oi_30m, has_30m, option_type='CE'):
+        """
+        🆕 NEW: OI Velocity Pattern Classifier (from Image 1)
+        
+        4 Patterns:
+        1. Acceleration: 15m > 30m (speed ↑)
+        2. Deceleration: 15m < 30m (speed ↓)  
+        3. Monster Loading: Both 15m & 30m very high
+        4. Exhaustion: 30m high but 15m low (slowing)
+        
+        Args:
+            oi_5m: 5-minute OI change %
+            oi_15m: 15-minute OI change %
+            oi_30m: 30-minute OI change %
+            has_30m: Whether 30m data available
+            option_type: 'CE' or 'PE'
+        
+        Returns:
+            (pattern, strength, description, confidence_modifier)
+        """
+        if not has_30m:
+            return "UNKNOWN", "none", "Insufficient data (need 30m history)", 0
+        
+        # Use absolute values for comparison
+        abs_5m = abs(oi_5m)
+        abs_15m = abs(oi_15m)
+        abs_30m = abs(oi_30m)
+        
+        # Pattern 1: ACCELERATION (15m > 30m - speed increasing)
+        if abs_15m > abs_30m and abs_15m > VELOCITY_ACCELERATION_MIN:
+            if abs_15m > VELOCITY_ACCELERATION_STRONG:
+                strength = "strong"
+                confidence = 15
+                desc = f"⚡ Speed ↑↑ ({option_type} 15m={oi_15m:.1f}% > 30m={oi_30m:.1f}%)"
+            else:
+                strength = "medium"
+                confidence = 10
+                desc = f"⚡ Speed ↑ ({option_type} 15m={oi_15m:.1f}% > 30m={oi_30m:.1f}%)"
+            
+            return "ACCELERATION", strength, desc, confidence
+        
+        # Pattern 2: DECELERATION (15m < 30m - speed decreasing)
+        elif abs_30m > abs_15m and abs_30m > VELOCITY_DECELERATION_MIN:
+            strength = "weak"
+            confidence = -10
+            desc = f"⚠️ Speed ↓ ({option_type} 15m={oi_15m:.1f}% < 30m={oi_30m:.1f}%)"
+            return "DECELERATION", strength, desc, confidence
+        
+        # Pattern 3: MONSTER LOADING (both 15m & 30m very high)
+        elif abs_15m > VELOCITY_MONSTER_15M and abs_30m > VELOCITY_MONSTER_30M:
+            strength = "strong"
+            confidence = 20
+            desc = f"🔥 MONSTER! ({option_type} 15m={oi_15m:.1f}%, 30m={oi_30m:.1f}%)"
+            return "MONSTER_LOADING", strength, desc, confidence
+        
+        # Pattern 4: EXHAUSTION (30m high but 15m low - slowing down)
+        elif abs_30m > VELOCITY_EXHAUSTION_30M and abs_15m < VELOCITY_EXHAUSTION_15M:
+            strength = "weak"
+            confidence = -15
+            desc = f"😴 Exhaustion ({option_type} 30m={oi_30m:.1f}% high, 15m={oi_15m:.1f}% low)"
+            return "EXHAUSTION", strength, desc, confidence
+        
+        # No special pattern
+        return "NORMAL", "none", f"No velocity pattern ({option_type})", 0
+    
+    @staticmethod
+    def analyze_otm_levels(strike_data, atm_strike, signal_type):
+        """
+        🆕 NEW: OTM Strike Analysis for Support/Resistance (from Image 3)
+        
+        Checks:
+        - OTM +100 (ATM + 100): Resistance for CE, Support for PE
+        - OTM -100 (ATM - 100): Support for CE, Resistance for PE
+        
+        Returns:
+            (has_support, has_resistance, confidence_modifier, details)
+        """
+        otm_above, otm_below = get_otm_strikes(atm_strike)
+        
+        # Get OTM data
+        above_data = strike_data.get(otm_above, {})
+        below_data = strike_data.get(otm_below, {})
+        
+        above_ce_oi = above_data.get('ce_oi', 0)
+        above_pe_oi = above_data.get('pe_oi', 0)
+        below_ce_oi = below_data.get('ce_oi', 0)
+        below_pe_oi = below_data.get('pe_oi', 0)
+        
+        confidence_modifier = 0
+        details = []
+        has_support = False
+        has_resistance = False
+        
+        if signal_type == "CE_BUY":
+            # For CE_BUY (bullish):
+            # - High PE OI at OTM -100 (below) = SUPPORT (good) ✅
+            # - High CE OI at OTM +100 (above) = RESISTANCE (bad) ❌
+            
+            if below_pe_oi > OTM_HIGH_OI_THRESHOLD:
+                has_support = True
+                confidence_modifier += 10
+                details.append(f"✅ Support at {otm_below} (PE OI: {below_pe_oi:,.0f})")
+            
+            if above_ce_oi > OTM_HIGH_OI_THRESHOLD:
+                has_resistance = True
+                confidence_modifier -= 10
+                details.append(f"⚠️ Resistance at {otm_above} (CE OI: {above_ce_oi:,.0f})")
+        
+        elif signal_type == "PE_BUY":
+            # For PE_BUY (bearish):
+            # - High CE OI at OTM +100 (above) = RESISTANCE (good) ✅
+            # - High PE OI at OTM -100 (below) = SUPPORT (bad) ❌
+            
+            if above_ce_oi > OTM_HIGH_OI_THRESHOLD:
+                has_resistance = True
+                confidence_modifier += 10
+                details.append(f"✅ Resistance at {otm_above} (CE OI: {above_ce_oi:,.0f})")
+            
+            if below_pe_oi > OTM_HIGH_OI_THRESHOLD:
+                has_support = True
+                confidence_modifier -= 10
+                details.append(f"⚠️ Support at {otm_below} (PE OI: {below_pe_oi:,.0f})")
+        
+        if not details:
+            details.append("No significant OTM levels")
+        
+        return has_support, has_resistance, confidence_modifier, " | ".join(details)
+    
+    @staticmethod
     def analyze_oi_with_price(ce_5m, ce_15m, pe_5m, pe_15m, price_change_pct):
         """
-        🔥 COMPLETE OI Analysis with PRICE direction
+        OI Analysis with PRICE direction + IMPROVED NAMING
         
-        🔧 FIX: Reduced price thresholds from 0.15% → 0.05%
-        Reason: Market often flat, missing strong OI signals with strict thresholds
-        
-        Detects 6 scenarios:
-        1. CE Long Buildup (STRONG BULLISH)
-        2. CE Short Covering (WEAK BULLISH)
-        3. CE Long Unwinding (WEAK BEARISH)
-        4. PE Short Buildup (STRONG BEARISH)
-        5. PE Short Covering (WEAK BEARISH)
-        6. PE Long Unwinding (WEAK BULLISH)
+        Detects 6 scenarios (with human-readable names):
+        1. CE Long Buildup → "SUPPORT BOUNCE" (CE↑ Price↑)
+        2. CE Short Covering → "WEAK BOUNCE" (CE↓ Price↑)
+        3. CE Long Unwinding → "PROFIT BOOKING" (CE↓ Price↓)
+        4. PE Short Buildup → "RESISTANCE REJECT" (PE↑ Price↓)
+        5. PE Short Covering → "WEAK DROP" (PE↓ Price↓)
+        6. PE Long Unwinding → "BEAR PROFIT BOOKING" (PE↓ Price↑)
         """
         
-        # 🔧 FIX: Lower thresholds for flat markets
         OI_BUILDUP_THRESHOLD = 3.0
         OI_UNWINDING_THRESHOLD = -5.0
         STRONG_BUILDUP = 7.0
         STRONG_UNWINDING = -8.0
-        PRICE_UP = 0.05       # 🔧 CHANGED: 0.15 → 0.05 (more sensitive)
-        PRICE_DOWN = -0.05    # 🔧 CHANGED: -0.15 → -0.05
+        PRICE_UP = 0.05
+        PRICE_DOWN = -0.05
         
         result = {
             'ce_scenario': None,
@@ -87,12 +217,13 @@ class OIAnalyzer:
             'pe_strength': 'none',
             'primary_direction': 'NEUTRAL',
             'confidence_boost': 0,
-            'details': {}
+            'details': {},
+            'human_name': 'NO_PATTERN'  # 🆕 NEW: Human-readable name
         }
         
         # ━━━━━━━━━━━━ CE ANALYSIS ━━━━━━━━━━━━
         
-        # Scenario 1: CE LONG BUILDUP
+        # Scenario 1: CE LONG BUILDUP → "SUPPORT BOUNCE"
         if (ce_5m > OI_BUILDUP_THRESHOLD and 
             ce_15m > OI_BUILDUP_THRESHOLD and 
             price_change_pct > PRICE_UP):
@@ -111,16 +242,17 @@ class OIAnalyzer:
             result['ce_signal'] = 'STRONG_BULLISH'
             result['ce_strength'] = strength
             result['confidence_boost'] = confidence - 70
+            result['human_name'] = 'SUPPORT_BOUNCE'  # 🆕 NEW
             result['details']['ce'] = {
                 'type': 'Fresh Call Buying',
-                'meaning': 'Bulls entering aggressively',
+                'meaning': 'Bulls adding calls (Support Bounce)',
                 'oi_5m': ce_5m,
                 'oi_15m': ce_15m,
                 'price_move': price_change_pct,
                 'action': 'BUY_CALL_HIGH_CONFIDENCE'
             }
         
-        # Scenario 2: CE SHORT COVERING
+        # Scenario 2: CE SHORT COVERING → "WEAK BOUNCE"
         elif (ce_5m < OI_UNWINDING_THRESHOLD and 
               ce_15m < OI_UNWINDING_THRESHOLD and 
               price_change_pct > PRICE_UP):
@@ -136,9 +268,10 @@ class OIAnalyzer:
             result['ce_signal'] = 'WEAK_BULLISH'
             result['ce_strength'] = strength
             result['confidence_boost'] = -10
+            result['human_name'] = 'WEAK_BOUNCE'  # 🆕 NEW
             result['details']['ce'] = {
                 'type': 'Call Unwinding (Short Covering)',
-                'meaning': 'Bears exiting, NOT fresh buying',
+                'meaning': 'Bears exiting calls (Weak Bounce)',
                 'oi_5m': ce_5m,
                 'oi_15m': ce_15m,
                 'price_move': price_change_pct,
@@ -146,7 +279,7 @@ class OIAnalyzer:
                 'warning': '⚠️ Temporary bounce, not sustainable'
             }
         
-        # Scenario 3: CE LONG UNWINDING
+        # Scenario 3: CE LONG UNWINDING → "PROFIT BOOKING"
         elif (ce_5m < OI_UNWINDING_THRESHOLD and 
               ce_15m < OI_UNWINDING_THRESHOLD and 
               price_change_pct < PRICE_DOWN):
@@ -161,6 +294,7 @@ class OIAnalyzer:
             result['ce_scenario'] = 'LONG_UNWINDING'
             result['ce_signal'] = 'WEAK_BEARISH'
             result['ce_strength'] = strength
+            result['human_name'] = 'PROFIT_BOOKING'  # 🆕 NEW
             result['details']['ce'] = {
                 'type': 'Call Unwinding (Long Exit)',
                 'meaning': 'Bulls booking profit',
@@ -173,7 +307,7 @@ class OIAnalyzer:
         
         # ━━━━━━━━━━━━ PE ANALYSIS ━━━━━━━━━━━━
         
-        # Scenario 4: PE SHORT BUILDUP
+        # Scenario 4: PE SHORT BUILDUP → "RESISTANCE REJECT"
         if (pe_5m > OI_BUILDUP_THRESHOLD and 
             pe_15m > OI_BUILDUP_THRESHOLD and 
             price_change_pct < PRICE_DOWN):
@@ -192,16 +326,17 @@ class OIAnalyzer:
             result['pe_signal'] = 'STRONG_BEARISH'
             result['pe_strength'] = strength
             result['confidence_boost'] = max(result['confidence_boost'], confidence - 70)
+            result['human_name'] = 'RESISTANCE_REJECT'  # 🆕 NEW
             result['details']['pe'] = {
                 'type': 'Fresh Put Buying',
-                'meaning': 'Bears entering aggressively',
+                'meaning': 'Bears adding puts (Resistance Reject)',
                 'oi_5m': pe_5m,
                 'oi_15m': pe_15m,
                 'price_move': price_change_pct,
                 'action': 'BUY_PUT_HIGH_CONFIDENCE'
             }
         
-        # Scenario 5: PE SHORT COVERING
+        # Scenario 5: PE SHORT COVERING → "WEAK DROP"
         elif (pe_5m < OI_UNWINDING_THRESHOLD and 
               pe_15m < OI_UNWINDING_THRESHOLD and 
               price_change_pct < PRICE_DOWN):
@@ -217,9 +352,10 @@ class OIAnalyzer:
             result['pe_signal'] = 'WEAK_BEARISH'
             result['pe_strength'] = strength
             result['confidence_boost'] = min(result['confidence_boost'], -10)
+            result['human_name'] = 'WEAK_DROP'  # 🆕 NEW
             result['details']['pe'] = {
                 'type': 'Put Unwinding (Short Covering)',
-                'meaning': 'Bulls exiting puts',
+                'meaning': 'Bulls exiting puts (Weak Drop)',
                 'oi_5m': pe_5m,
                 'oi_15m': pe_15m,
                 'price_move': price_change_pct,
@@ -227,7 +363,7 @@ class OIAnalyzer:
                 'warning': '⚠️ Temporary dip'
             }
         
-        # Scenario 6: PE LONG UNWINDING
+        # Scenario 6: PE LONG UNWINDING → "BEAR PROFIT BOOKING"
         elif (pe_5m < OI_UNWINDING_THRESHOLD and 
               pe_15m < OI_UNWINDING_THRESHOLD and 
               price_change_pct > PRICE_UP):
@@ -242,6 +378,7 @@ class OIAnalyzer:
             result['pe_scenario'] = 'LONG_UNWINDING'
             result['pe_signal'] = 'WEAK_BULLISH'
             result['pe_strength'] = strength
+            result['human_name'] = 'BEAR_PROFIT_BOOKING'  # 🆕 NEW
             result['details']['pe'] = {
                 'type': 'Put Unwinding (Long Exit)',
                 'meaning': 'Bears booking profit',
@@ -258,7 +395,6 @@ class OIAnalyzer:
         ce_bearish = result['ce_signal'] in ['STRONG_BEARISH', 'WEAK_BEARISH']
         pe_bearish = result['pe_signal'] in ['STRONG_BEARISH', 'WEAK_BEARISH']
         
-        # Confluence check
         if ce_bullish and pe_bullish:
             result['primary_direction'] = 'STRONG_BULLISH'
             result['confidence_boost'] += 15
@@ -372,12 +508,7 @@ class VolumeAnalyzer:
     
     @staticmethod
     def analyze_volume_trend(df, periods=15, futures_ltp=None):
-        """
-        ⚠️ DISABLED: Volume analysis (Upstox API returns cached/stale data)
-        
-        Returns dummy values - Volume confirmation NOT USED
-        Focus on OI + Price for signals
-        """
+        """⚠️ DISABLED: Volume analysis (stale data)"""
         return {
             'trend': 'unknown',
             'avg_volume': 0,
@@ -419,7 +550,7 @@ class TechnicalAnalyzer:
     
     @staticmethod
     def validate_signal_with_vwap(signal_type, spot, vwap, atr):
-        """🔧 FIX #2: STRENGTHENED VWAP validation for PE_BUY"""
+        """STRICT VWAP validation"""
         if not vwap or not spot or not atr:
             return False, "Missing VWAP/Price data", 0
         
@@ -431,7 +562,6 @@ class TechnicalAnalyzer:
             buffer = VWAP_BUFFER
         
         if signal_type == "CE_BUY":
-            # CE_BUY: Price should be NEAR or ABOVE VWAP
             if distance < -buffer:
                 return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             elif distance > buffer * 3:
@@ -444,18 +574,14 @@ class TechnicalAnalyzer:
                 return True, f"VWAP OK: {distance:+.0f} pts", int(score)
         
         elif signal_type == "PE_BUY":
-            # 🔧 FIX: PE_BUY MUST be BELOW VWAP (bearish)
-            # If price is ABOVE VWAP, it's NOT bearish!
             if distance > 0:
                 return False, f"⚠️ Price ABOVE VWAP (+{distance:.0f} pts) - NOT BEARISH!", 0
             
-            # Price is below VWAP (correct bearish position)
             if distance > buffer:
                 return False, f"Price {distance:.0f} pts above VWAP", 0
             elif distance < -buffer * 3:
                 return False, f"Price {abs(distance):.0f} pts below VWAP", 0
             else:
-                # Score higher when price is clearly below VWAP
                 if distance < 0:
                     score = min(100, 80 + (abs(distance) / buffer * 20))
                 else:
