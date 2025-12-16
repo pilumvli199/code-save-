@@ -44,10 +44,17 @@ class UpstoxClient:
         self.futures_key = None
         self.futures_expiry = None
         self.futures_symbol = None
+        self.weekly_expiry = None  # 🔧 FIX: Add weekly_expiry attribute
     
     async def initialize(self):
-        """Initialize session and detect instruments"""
+        """🔧 FIX: Initialize session and detect instruments"""
         self.session = aiohttp.ClientSession()
+        
+        # Set weekly expiry
+        from config import get_next_weekly_expiry
+        from datetime import datetime
+        self.weekly_expiry = datetime.strptime(get_next_weekly_expiry(), '%Y-%m-%d')
+        
         success = await self.detect_instruments()
         return success
     
