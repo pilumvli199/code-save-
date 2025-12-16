@@ -58,16 +58,30 @@ class NiftyTradingBot:
         logger.info(f"🚀 Initializing NIFTY Bot v{BOT_VERSION}")
         logger.info("=" * 60)
         
-        # Initialize Upstox
-        self.upstox = UpstoxClient()
-        success = await self.upstox.initialize()
-        
-        if not success:
-            raise Exception("Failed to initialize Upstox client")
-        
-        self.data_fetcher = DataFetcher(self.upstox)
+        try:
+            # Initialize Upstox
+            logger.info("📡 Connecting to Upstox API...")
+            self.upstox = UpstoxClient()
+            success = await self.upstox.initialize()
+            
+            if not success:
+                error_msg = "❌ Failed to initialize Upstox client - Check API credentials!"
+                logger.error(error_msg)
+                if self.telegram.is_enabled():
+                    await self.telegram.send(f"<b>⚠️ Bot Startup Failed</b>\n\n{error_msg}")
+                raise Exception(error_msg)
+            
+            logger.info("✅ Upstox API connected")
+            
+            # Initialize data fetcher
+            self.data_fetcher = DataFetcher(self.upstox)
         
         futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
+        
+        # 🔧 FIX: Get expiry dates properly
+        weekly_expiry_str = self.upstox.weekly_expiry.strftime('%d-%b-%Y (%A)') if self.upstox.weekly_expiry else "Auto"
+        futures_expiry_str = self.upstox.futures_expiry.strftime('%d-%b-%Y') if self.upstox.futures_expiry else "Auto"
+        futures_days = (self.upstox.futures_expiry - get_ist_time()).days if self.upstox.futures_expiry else 0
         
         current_time = format_time_ist(get_ist_time())
         
@@ -82,7 +96,7 @@ class NiftyTradingBot:
 🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
 ━━━━━━━━━━━━━━━━━━━━
-🔧 <b>v7.0 FIXES</b>
+🔧 <b>v7.0 COMPREHENSIVE FIX</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 ✅ 30m OI comparison
@@ -98,47 +112,93 @@ class NiftyTradingBot:
 ━━━━━━━━━━━━━━━━━━━━
 
 <b>Futures (MONTHLY):</b>
-• Contract: {futures_contract}
-• Auto-detected
+• {futures_contract}
+• Expiry: {futures_expiry_str}
+• Days Left: {futures_days}
 
 <b>Options (WEEKLY):</b>
-• Expiry: Auto-selected
-• Every Tuesday
+• Expiry: {weekly_expiry_str}
+• Strike Gap: ₹{STRIKE_GAP}
 
 ━━━━━━━━━━━━━━━━━━━━
-📊 <b>OI ANALYSIS</b>
+📊 <b>OI ANALYSIS ENGINE</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Timeframes:</b>
-• 5m (momentum)
-• 15m (trend)
-• 🆕 30m (velocity)
+<b>Multi-Timeframe OI:</b>
+• 5m (Momentum)
+• 15m (Trend Confirmation)
+• 🆕 30m (Velocity Pattern)
 
-<b>Strike Range:</b>
-• Fetch: {fetch_min}-{fetch_max} (11)
-• Deep: {deep_range} (5)
-• 🆕 OTM: {otm_above}/{otm_below}
+<b>Strike Coverage:</b>
+• Fetch: {fetch_min}-{fetch_max} (11 strikes)
+• Deep Analysis: {deep_range} (5 strikes)
+• 🆕 OTM: {otm_above}/{otm_below} (Support/Resistance)
 
-<b>🆕 Velocity Patterns:</b>
-• Acceleration (15m > 30m)
-• Monster Loading (both high)
-• Deceleration (15m < 30m)
-• Exhaustion (30m high, 15m low)
+<b>🆕 OI Velocity Patterns:</b>
+• ⚡ Acceleration (15m > 30m) → Speed ↑
+• 🔥 Monster Loading (both > 8%) → Explosive
+• ⚠️ Deceleration (15m < 30m) → Speed ↓
+• 😴 Exhaustion (30m high, 15m low) → Slowing
+
+<b>OI Scenarios (Image 2):</b>
+• Support Bounce (CE↑ Price↑)
+• Resistance Reject (PE↑ Price↓)
+• Bull/Bear Trap Detection
+• Strong Bull/Bear Patterns
 
 ━━━━━━━━━━━━━━━━━━━━
-⚙️ <b>RISK SETTINGS</b>
+🎯 <b>SIGNAL FILTERS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
+<b>Primary Checks (need 2/3):</b>
+✅ Multi-TF OI unwinding (5m+15m)
+✅ ATM OI threshold: {ATM_OI_THRESHOLD}%
+✅ Volume confirmation
+
+<b>VWAP Validation:</b>
+• Min Score: {MIN_VWAP_SCORE}/100 (strict)
+• CE_BUY: Price MUST be > VWAP
+• PE_BUY: Price MUST be < VWAP
+
+<b>PCR Bias Bands:</b>
+• < {PCR_OVERHEATED}: OVERHEATED (avoid CE)
+• {PCR_BALANCED_BULL}-{PCR_NEUTRAL_HIGH}: NEUTRAL
+• > {PCR_OVERSOLD}: OVERSOLD (avoid PE)
+
+<b>Additional Filters:</b>
+• ⚠️ Reversal: Both ATM unwinding → NO_TRADE
+• ⚠️ Trap: One-sided spike → NO_TRADE
+• ⏰ Time: No new trades after 3:00 PM
+
+━━━━━━━━━━━━━━━━━━━━
+⚙️ <b>RISK MANAGEMENT</b>
+━━━━━━━━━━━━━━━━━━━━
+
+<b>Entry:</b>
 • Min Confidence: {MIN_CONFIDENCE}%
-• 🆕 VWAP Score: {MIN_VWAP_SCORE}+ (raised)
-• PCR Bands: {PCR_OVERHEATED}-{PCR_OVERSOLD}
-• ATR: {ATR_TARGET_MULTIPLIER}x target
+• ATR Target: {ATR_TARGET_MULTIPLIER}x
+• ATR Stop: {ATR_SL_MULTIPLIER}x
+
+<b>Exit:</b>
+• Trailing SL: {TRAILING_SL_DISTANCE * 100:.0f}% from peak
+• Min Hold: {MIN_HOLD_TIME_MINUTES} min
+• Max Loss: {PREMIUM_SL_PERCENT}% of premium
 
 ━━━━━━━━━━━━━━━━━━━━
-⏰ <b>STARTED</b>
+💾 <b>MEMORY STATUS</b>
+━━━━━━━━━━━━━━━━━━━━
+
+OI Tracker: {OI_MEMORY_SCANS} scans capacity
+Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
+
+━━━━━━━━━━━━━━━━━━━━
+⏰ <b>BOT STARTED</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 {current_time}
+
+🔄 Scan Interval: {SCAN_INTERVAL}s
+📡 Ready for market data...
 """
         
         if self.telegram.is_enabled():
