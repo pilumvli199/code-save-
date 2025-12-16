@@ -8,6 +8,7 @@ from datetime import datetime
 
 from config import *
 from utils import *
+from expiry_utils import get_next_weekly_expiry, get_next_monthly_expiry, format_expiry_display
 from data_manager import UpstoxClient, RedisBrain, DataFetcher, InMemoryOITracker
 from analyzers import OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, MarketAnalyzer
 from signal_engine import SignalGenerator, SignalValidator
@@ -58,6 +59,7 @@ class NiftyTradingBot:
         self.data_fetcher = DataFetcher(self.upstox)
         
         weekly_expiry = get_next_weekly_expiry()
+        weekly_display = format_expiry_display(weekly_expiry)
         monthly_expiry = self.upstox.futures_expiry.strftime('%Y-%m-%d') if self.upstox.futures_expiry else "AUTO"
         futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
         
@@ -107,6 +109,8 @@ class NiftyTradingBot:
 
 <b>Options (WEEKLY):</b>
 • Expiry: {weekly_expiry}
+• Display: {weekly_display}
+• 🔄 Auto-selected (Nearest Tuesday)
 
 ━━━━━━━━━━━━━━━━━━━━
 📊 <b>DATA STRATEGY</b>
