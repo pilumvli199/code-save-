@@ -1,6 +1,12 @@
 """
-NIFTY Trading Bot - Main Orchestrator v6.0
-COMPREHENSIVE FIX: All validation improvements + No expiry_utils
+NIFTY Trading Bot - Main Orchestrator v7.0 - COMPREHENSIVE FIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 INTEGRATED:
+1. 30m OI comparison
+2. OI Velocity analysis
+3. OTM strike analysis
+4. All validation fixes
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import asyncio
@@ -10,23 +16,23 @@ from config import *
 from utils import *
 from data_manager import UpstoxClient, RedisBrain, DataFetcher, InMemoryOITracker
 from analyzers import OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, MarketAnalyzer
-from signal_engine import SignalGenerator, SignalValidator  # 🔥 v6
+from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
-BOT_VERSION = "6.0-COMPREHENSIVE-FIX"
+BOT_VERSION = "7.0-COMPREHENSIVE-FIX"
 
 logger = setup_logger("main")
 
 
 class NiftyTradingBot:
-    """Main bot orchestrator - v6.0 COMPREHENSIVE FIX"""
+    """Main bot orchestrator - v7.0 COMPREHENSIVE FIX"""
     
     def __init__(self):
-        # 🆕 In-Memory OI Tracker (No Redis needed!)
+        # 🆕 In-Memory OI Tracker with 35-scan capacity
         self.oi_tracker = InMemoryOITracker()
         
-        # Redis Brain (deprecated, keeping for compatibility)
+        # Redis Brain for price tracking
         self.memory = RedisBrain()
         
         self.upstox = None
@@ -61,9 +67,7 @@ class NiftyTradingBot:
         
         self.data_fetcher = DataFetcher(self.upstox)
         
-        # Get contract details (expiry auto-detected by Upstox)
         futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
-        weekly_expiry = self.upstox.weekly_expiry.strftime('%Y-%m-%d') if self.upstox.weekly_expiry else "AUTO"
         
         current_time = format_time_ist(get_ist_time())
         
@@ -72,20 +76,22 @@ class NiftyTradingBot:
         deep_range = f"{deep_strikes[0]}-{deep_strikes[-1]}"
         
         fetch_min, fetch_max = get_strike_range_fetch(example_atm)
+        otm_above, otm_below = get_otm_strikes(example_atm)
         
         startup_msg = f"""
 🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
 ━━━━━━━━━━━━━━━━━━━━
-🔧 <b>v6.0 COMPREHENSIVE FIX</b>
+🔧 <b>v7.0 FIXES</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-✅ VWAP Hard Validation (price MUST be correct side)
-✅ Reversal Detection (both ATM unwinding = NO_TRADE)
-✅ Time Filter (no trades after 3:00 PM)
-✅ Trap Detection (one-sided spike = NO_TRADE)
-✅ PCR Bias Bands (context-aware signals)
-✅ Raised VWAP threshold (50 → 70)
+✅ 30m OI comparison
+✅ OI Velocity (4 patterns)
+✅ OTM strike analysis
+✅ VWAP strict validation
+✅ Reversal detection
+✅ Trap detection
+✅ Time filter (3:00 PM cutoff)
 
 ━━━━━━━━━━━━━━━━━━━━
 📅 <b>CONTRACT DETAILS</b>
@@ -93,41 +99,40 @@ class NiftyTradingBot:
 
 <b>Futures (MONTHLY):</b>
 • Contract: {futures_contract}
-• Expiry: Auto-detected
+• Auto-detected
 
 <b>Options (WEEKLY):</b>
-• Expiry: {weekly_expiry}
-• Auto-selected by Upstox
+• Expiry: Auto-selected
+• Every Tuesday
 
 ━━━━━━━━━━━━━━━━━━━━
-📊 <b>DATA STRATEGY</b>
+📊 <b>OI ANALYSIS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
-<b>Analysis Window:</b>
-• ATM ± 5 strikes (11 total)
-• Deep: {deep_range}
-• Fetch: {fetch_min}-{fetch_max}
+<b>Timeframes:</b>
+• 5m (momentum)
+• 15m (trend)
+• 🆕 30m (velocity)
 
-<b>OI Tracking:</b>
-• 5m changes (momentum)
-• 15m changes (trend)
-• ATM-specific analysis
-• 🆕 In-Memory tracking
+<b>Strike Range:</b>
+• Fetch: {fetch_min}-{fetch_max} (11)
+• Deep: {deep_range} (5)
+• 🆕 OTM: {otm_above}/{otm_below}
 
-<b>Technical:</b>
-• VWAP (strict validation)
-• ATR stops
-• Price action
-• PCR bias
+<b>🆕 Velocity Patterns:</b>
+• Acceleration (15m > 30m)
+• Monster Loading (both high)
+• Deceleration (15m < 30m)
+• Exhaustion (30m high, 15m low)
 
 ━━━━━━━━━━━━━━━━━━━━
 ⚙️ <b>RISK SETTINGS</b>
 ━━━━━━━━━━━━━━━━━━━━
 
 • Min Confidence: {MIN_CONFIDENCE}%
-• ATR Multiplier: {ATR_TARGET_MULTIPLIER}x
-• Stop Loss: {ATR_SL_MULTIPLIER}x ATR
-• PCR Range: {PCR_BEARISH}-{PCR_BULLISH}
+• 🆕 VWAP Score: {MIN_VWAP_SCORE}+ (raised)
+• PCR Bands: {PCR_OVERHEATED}-{PCR_OVERSOLD}
+• ATR: {ATR_TARGET_MULTIPLIER}x target
 
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ <b>STARTED</b>
@@ -139,9 +144,8 @@ class NiftyTradingBot:
         if self.telegram.is_enabled():
             await self.telegram.send(startup_msg)
         
-        logger.info("✅ Bot initialized (v6.0 COMPREHENSIVE FIX)")
+        logger.info("✅ Bot initialized (v7.0 COMPREHENSIVE FIX)")
         logger.info(f"📅 Futures: {futures_contract}")
-        logger.info(f"📅 Weekly: {weekly_expiry}")
         logger.info("=" * 60)
     
     async def shutdown(self):
@@ -155,18 +159,17 @@ class NiftyTradingBot:
         logger.info("✅ Shutdown complete")
     
     async def scan_market(self):
-        """Single market scan"""
+        """Single market scan with 30m OI support"""
         try:
             now_ist = get_ist_time()
             time_str = format_time_ist(now_ist)
-            market_status = "OPEN" if is_market_open(now_ist) else "CLOSED"
+            market_status = "OPEN" if is_market_open() else "CLOSED"
             
             logger.info("")
             logger.info("=" * 60)
             logger.info(f"⏰ {time_str} | {market_status}")
             logger.info("=" * 60)
             
-            # Skip if market closed
             if market_status == "CLOSED":
                 logger.info("⏸️ Market closed - Skipping scan")
                 return
@@ -187,15 +190,18 @@ class NiftyTradingBot:
             logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars")
             logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f}")
             
+            # Save price
+            self.memory.save_price(futures_ltp)
+            
             # Price changes
             price_5m, has_price_5m = self.memory.get_price_change(futures_ltp, 5)
             price_15m, has_price_15m = self.memory.get_price_change(futures_ltp, 15)
-            price_open = ((futures_ltp - self.memory.session_open) / self.memory.session_open * 100) if self.memory.session_open else 0
+            price_30m, has_price_30m = self.memory.get_price_change(futures_ltp, 30)  # 🆕 NEW
             
-            logger.info(f"  🆕 Price Changes:")
+            logger.info(f"  📈 Price Changes:")
             logger.info(f"     5m:  {price_5m:+.2f}% {'✅' if has_price_5m else '⏳'}")
             logger.info(f"     15m: {price_15m:+.2f}% {'✅' if has_price_15m else '⏳'}")
-            logger.info(f"     From Open: {price_open:+.2f}%")
+            logger.info(f"     🆕 30m: {price_30m:+.2f}% {'✅' if has_price_30m else '⏳'}")
             
             # ========== OPTION CHAIN ==========
             
@@ -211,63 +217,70 @@ class NiftyTradingBot:
             logger.info(f"  ✅ Total OI: CE={total_ce:,.0f}, PE={total_pe:,.0f}")
             
             # Deep OI
-            deep_ce, deep_pe = self.oi_analyzer.calculate_deep_oi(strike_data, atm)
+            deep_ce, deep_pe, deep_strikes = self.oi_analyzer.calculate_deep_analysis_oi(strike_data, atm)
             logger.info(f"  🔍 Deep OI: CE={deep_ce:,.0f}, PE={deep_pe:,.0f}")
             
-            # ========== OI CALCULATION ==========
+            # ========== OI CALCULATION (5m, 15m, 30m) ==========
             
             logger.info("📊 Calculating OI changes...")
             
-            # 🆕 USE IN-MEMORY TRACKER
-            prev_total_ce, prev_total_pe, prev_atm_ce, prev_atm_pe, has_history = self.oi_tracker.get_comparison(minutes_ago=5)
+            # 🆕 GET ATM data first
+            atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
+            current_atm_ce = atm_data.get('ce_oi', 0)
+            current_atm_pe = atm_data.get('pe_oi', 0)
             
-            if has_history:
-                ce_5m = ((total_ce - prev_total_ce) / prev_total_ce * 100) if prev_total_ce > 0 else 0.0
-                pe_5m = ((total_pe - prev_total_pe) / prev_total_pe * 100) if prev_total_pe > 0 else 0.0
-                has_5m = True
+            # ━━━━━━━━━━━━ 5-MINUTE COMPARISON ━━━━━━━━━━━━
+            prev_total_ce_5m, prev_total_pe_5m, prev_atm_ce_5m, prev_atm_pe_5m, has_5m = self.oi_tracker.get_comparison(minutes_ago=5)
+            
+            if has_5m:
+                ce_5m = ((total_ce - prev_total_ce_5m) / prev_total_ce_5m * 100) if prev_total_ce_5m > 0 else 0.0
+                pe_5m = ((total_pe - prev_total_pe_5m) / prev_total_pe_5m * 100) if prev_total_pe_5m > 0 else 0.0
                 
-                atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
-                current_atm_ce = atm_data.get('ce_oi', 0)
-                current_atm_pe = atm_data.get('pe_oi', 0)
-                
-                atm_ce_5m = ((current_atm_ce - prev_atm_ce) / prev_atm_ce * 100) if prev_atm_ce > 0 else 0.0
-                atm_pe_5m = ((current_atm_pe - prev_atm_pe) / prev_atm_pe * 100) if prev_atm_pe > 0 else 0.0
-                has_atm_5m = True
+                atm_ce_5m = ((current_atm_ce - prev_atm_ce_5m) / prev_atm_ce_5m * 100) if prev_atm_ce_5m > 0 else 0.0
+                atm_pe_5m = ((current_atm_pe - prev_atm_pe_5m) / prev_atm_pe_5m * 100) if prev_atm_pe_5m > 0 else 0.0
             else:
                 ce_5m = pe_5m = atm_ce_5m = atm_pe_5m = 0.0
-                has_5m = has_atm_5m = False
             
-            # 15-minute comparison
-            prev_total_ce_15, prev_total_pe_15, prev_atm_ce_15, prev_atm_pe_15, has_history_15 = self.oi_tracker.get_comparison(minutes_ago=15)
+            # ━━━━━━━━━━━━ 15-MINUTE COMPARISON ━━━━━━━━━━━━
+            prev_total_ce_15m, prev_total_pe_15m, prev_atm_ce_15m, prev_atm_pe_15m, has_15m = self.oi_tracker.get_comparison(minutes_ago=15)
             
-            if has_history_15:
-                ce_15m = ((total_ce - prev_total_ce_15) / prev_total_ce_15 * 100) if prev_total_ce_15 > 0 else 0.0
-                pe_15m = ((total_pe - prev_total_pe_15) / prev_total_pe_15 * 100) if prev_total_pe_15 > 0 else 0.0
+            if has_15m:
+                ce_15m = ((total_ce - prev_total_ce_15m) / prev_total_ce_15m * 100) if prev_total_ce_15m > 0 else 0.0
+                pe_15m = ((total_pe - prev_total_pe_15m) / prev_total_pe_15m * 100) if prev_total_pe_15m > 0 else 0.0
                 
-                atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
-                current_atm_ce = atm_data.get('ce_oi', 0)
-                current_atm_pe = atm_data.get('pe_oi', 0)
-                
-                atm_ce_15m = ((current_atm_ce - prev_atm_ce_15) / prev_atm_ce_15 * 100) if prev_atm_ce_15 > 0 else 0.0
-                atm_pe_15m = ((current_atm_pe - prev_atm_pe_15) / prev_atm_pe_15 * 100) if prev_atm_pe_15 > 0 else 0.0
-                has_15m = has_atm_15m = True
+                atm_ce_15m = ((current_atm_ce - prev_atm_ce_15m) / prev_atm_ce_15m * 100) if prev_atm_ce_15m > 0 else 0.0
+                atm_pe_15m = ((current_atm_pe - prev_atm_pe_15m) / prev_atm_pe_15m * 100) if prev_atm_pe_15m > 0 else 0.0
             else:
                 ce_15m = pe_15m = atm_ce_15m = atm_pe_15m = 0.0
-                has_15m = has_atm_15m = False
+            
+            # ━━━━━━━━━━━━ 🆕 30-MINUTE COMPARISON ━━━━━━━━━━━━
+            prev_total_ce_30m, prev_total_pe_30m, prev_atm_ce_30m, prev_atm_pe_30m, has_30m = self.oi_tracker.get_comparison(minutes_ago=30)
+            
+            if has_30m:
+                ce_30m = ((total_ce - prev_total_ce_30m) / prev_total_ce_30m * 100) if prev_total_ce_30m > 0 else 0.0
+                pe_30m = ((total_pe - prev_total_pe_30m) / prev_total_pe_30m * 100) if prev_total_pe_30m > 0 else 0.0
+                
+                logger.info(f"  🆕 30m: CE={ce_30m:+.1f}% PE={pe_30m:+.1f}% ✅")
+            else:
+                ce_30m = pe_30m = 0.0
+                logger.info(f"  🆕 30m: Waiting... (need 30+ min history) ⏳")
             
             # 🆕 SAVE current snapshot
-            atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
             self.oi_tracker.save_snapshot(
                 total_ce=total_ce,
                 total_pe=total_pe,
                 atm_strike=atm,
-                atm_ce_oi=atm_data.get('ce_oi', 0),
-                atm_pe_oi=atm_data.get('pe_oi', 0)
+                atm_ce_oi=current_atm_ce,
+                atm_pe_oi=current_atm_pe
             )
+            
+            # Display tracker status
+            tracker_status = self.oi_tracker.get_status()
+            logger.info(f"  💾 Tracker: {tracker_status['scans']}/{OI_MEMORY_SCANS} scans | 5m✅ 15m{'✅' if tracker_status['ready_15m'] else '⏳'} 30m{'✅' if tracker_status['ready_30m'] else '⏳'}")
             
             logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
             logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-            logger.info(f"  ATM: CE={atm_ce_5m:+.1f}% PE={atm_pe_5m:+.1f}% {'✅' if has_atm_5m else '⏳'}")
+            logger.info(f"  ATM: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
             
             # ========== PRICE-AWARE OI ANALYSIS ==========
             
@@ -281,8 +294,9 @@ class NiftyTradingBot:
                 price_change_pct=price_5m if has_price_5m else 0.0
             )
             
-            logger.info(f"  📊 Primary Direction: {oi_scenario['primary_direction']}")
-            logger.info(f"  🎯 Confidence Boost: {oi_scenario['confidence_boost']:+d}%")
+            logger.info(f"  📊 Pattern: {oi_scenario['human_name']}")
+            logger.info(f"  🎯 Direction: {oi_scenario['primary_direction']}")
+            logger.info(f"  💪 Confidence Boost: {oi_scenario['confidence_boost']:+d}%")
             
             if oi_scenario['ce_scenario']:
                 ce_detail = oi_scenario['details'].get('ce', {})
@@ -296,6 +310,21 @@ class NiftyTradingBot:
                 if pe_detail.get('warning'):
                     logger.warning(f"     ⚠️ {pe_detail['warning']}")
             
+            # ========== 🆕 OI VELOCITY ANALYSIS ==========
+            
+            logger.info("\n🚀 OI VELOCITY ANALYSIS:")
+            
+            ce_velocity, ce_vel_strength, ce_vel_desc, ce_vel_conf = self.oi_analyzer.classify_oi_velocity(
+                ce_5m, ce_15m, ce_30m, has_30m, 'CE'
+            )
+            
+            pe_velocity, pe_vel_strength, pe_vel_desc, pe_vel_conf = self.oi_analyzer.classify_oi_velocity(
+                pe_5m, pe_15m, pe_30m, has_30m, 'PE'
+            )
+            
+            logger.info(f"  📞 CE: {ce_velocity} ({ce_vel_strength}) | {ce_vel_desc}")
+            logger.info(f"  📞 PE: {pe_velocity} ({pe_vel_strength}) | {pe_vel_desc}")
+            
             # ========== TECHNICAL ANALYSIS ==========
             
             logger.info("\n🔍 Running technical analysis...")
@@ -307,13 +336,7 @@ class NiftyTradingBot:
             candle = self.technical_analyzer.analyze_candle(futures_df)
             momentum = self.technical_analyzer.detect_momentum(futures_df)
             
-            vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df, futures_ltp=futures_ltp)
-            
-            # ⚠️ VOLUME DISABLED (Upstox data stale)
-            logger.info(f"\n⚠️ Volume analysis: DISABLED (unreliable data)")
-            logger.info(f"  Confirmation via: OI + Price direction only")
-            
-            vol_spike, vol_ratio = False, 1.0  # Disabled
+            vol_spike, vol_ratio = False, 1.0
             order_flow = self.volume_analyzer.calculate_order_flow(strike_data)
             
             gamma = self.market_analyzer.detect_gamma_zone()
@@ -327,8 +350,7 @@ class NiftyTradingBot:
                 oi_strength = 'weak'
             
             logger.info(f"  PCR: {pcr:.2f}, VWAP: ₹{vwap:.2f}, ATR: {atr:.1f}")
-            logger.info(f"  Candle: {candle['color']} ({candle['type']})")
-            logger.info(f"  OI Strength: {oi_strength}, Unwinding: {unwinding}")
+            logger.info(f"  Candle: {candle['color']} | OI Strength: {oi_strength}")
             
             # ========== SIGNAL GENERATION ==========
             
@@ -349,18 +371,22 @@ class NiftyTradingBot:
                 atr=atr,
                 atm_strike=atm,
                 atm_data=atm_data,
+                strike_data=strike_data,  # 🆕 NEW: Pass for OTM analysis
                 ce_total_5m=ce_5m,
                 pe_total_5m=pe_5m,
                 ce_total_15m=ce_15m,
                 pe_total_15m=pe_15m,
+                ce_total_30m=ce_30m,  # 🆕 NEW
+                pe_total_30m=pe_30m,  # 🆕 NEW
                 atm_ce_5m=atm_ce_5m,
                 atm_pe_5m=atm_pe_5m,
                 atm_ce_15m=atm_ce_15m,
                 atm_pe_15m=atm_pe_15m,
                 has_5m_total=has_5m,
                 has_15m_total=has_15m,
-                has_5m_atm=has_atm_5m,
-                has_15m_atm=has_atm_15m,
+                has_30m_total=has_30m,  # 🆕 NEW
+                has_5m_atm=has_5m,
+                has_15m_atm=has_15m,
                 volume_spike=vol_spike,
                 volume_ratio=vol_ratio,
                 order_flow=order_flow,
