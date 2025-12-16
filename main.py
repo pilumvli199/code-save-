@@ -89,6 +89,11 @@ class NiftyTradingBot:
             
             logger.info(f"  📌 Futures: {futures_contract} (Expiry: {futures_expiry_str}, {futures_days} days left)")
             logger.info(f"  📌 Options: Weekly expiry {weekly_expiry_str}")
+            logger.info(f"")
+            logger.info(f"  ℹ️  DATA SOURCES:")
+            logger.info(f"     📊 Candles: From MONTHLY futures ({futures_contract})")
+            logger.info(f"     📈 Option Chain: From WEEKLY options (Exp: {weekly_expiry_str})")
+            logger.info(f"     ✅ Analysis: OI + Price from both combined")
             
             current_time = format_time_ist(get_ist_time())
             
@@ -101,6 +106,12 @@ class NiftyTradingBot:
             
             # Build startup message
             logger.info("📱 Preparing Telegram startup message...")
+            
+            # Escape HTML special characters for Telegram
+            def escape_html(text):
+                """Escape HTML special characters"""
+                return str(text).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+            
             startup_msg = f"""
 🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
@@ -121,12 +132,12 @@ class NiftyTradingBot:
 ━━━━━━━━━━━━━━━━━━━━
 
 <b>Futures (MONTHLY):</b>
-• {futures_contract}
-• Expiry: {futures_expiry_str}
+• {escape_html(futures_contract)}
+• Expiry: {escape_html(futures_expiry_str)}
 • Days Left: {futures_days}
 
 <b>Options (WEEKLY):</b>
-• Expiry: {weekly_expiry_str}
+• Expiry: {escape_html(weekly_expiry_str)}
 • Strike Gap: ₹{STRIKE_GAP}
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -144,12 +155,12 @@ class NiftyTradingBot:
 • 🆕 OTM: {otm_above}/{otm_below} (Support/Resistance)
 
 <b>🆕 OI Velocity Patterns:</b>
-• ⚡ Acceleration (15m > 30m) → Speed ↑
-• 🔥 Monster Loading (both > 8%) → Explosive
-• ⚠️ Deceleration (15m < 30m) → Speed ↓
-• 😴 Exhaustion (30m high, 15m low) → Slowing
+• Acceleration (15m &gt; 30m) → Speed ↑
+• Monster Loading (both &gt; 8%) → Explosive
+• Deceleration (15m &lt; 30m) → Speed ↓
+• Exhaustion (30m high, 15m low) → Slowing
 
-<b>OI Scenarios (Image 2):</b>
+<b>OI Scenarios:</b>
 • Support Bounce (CE↑ Price↑)
 • Resistance Reject (PE↑ Price↓)
 • Bull/Bear Trap Detection
@@ -166,18 +177,18 @@ class NiftyTradingBot:
 
 <b>VWAP Validation:</b>
 • Min Score: {MIN_VWAP_SCORE}/100 (strict)
-• CE_BUY: Price MUST be > VWAP
-• PE_BUY: Price MUST be < VWAP
+• CE_BUY: Price MUST be &gt; VWAP
+• PE_BUY: Price MUST be &lt; VWAP
 
 <b>PCR Bias Bands:</b>
-• < {PCR_OVERHEATED}: OVERHEATED (avoid CE)
+• &lt; {PCR_OVERHEATED}: OVERHEATED (avoid CE)
 • {PCR_BALANCED_BULL}-{PCR_NEUTRAL_HIGH}: NEUTRAL
-• > {PCR_OVERSOLD}: OVERSOLD (avoid PE)
+• &gt; {PCR_OVERSOLD}: OVERSOLD (avoid PE)
 
 <b>Additional Filters:</b>
-• ⚠️ Reversal: Both ATM unwinding → NO_TRADE
-• ⚠️ Trap: One-sided spike → NO_TRADE
-• ⏰ Time: No new trades after 3:00 PM
+• Reversal: Both ATM unwinding → NO_TRADE
+• Trap: One-sided spike → NO_TRADE
+• Time: No new trades after 3:00 PM
 
 ━━━━━━━━━━━━━━━━━━━━
 ⚙️ <b>RISK MANAGEMENT</b>
@@ -189,7 +200,7 @@ class NiftyTradingBot:
 • ATR Stop: {ATR_SL_MULTIPLIER}x
 
 <b>Exit:</b>
-• Trailing SL: {TRAILING_SL_DISTANCE * 100:.0f}% from peak
+• Trailing SL: {int(TRAILING_SL_DISTANCE * 100)}% from peak
 • Min Hold: {MIN_HOLD_TIME_MINUTES} min
 • Max Loss: {PREMIUM_SL_PERCENT}% of premium
 
