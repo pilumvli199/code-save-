@@ -8,7 +8,7 @@ from datetime import datetime
 
 from config import *
 from utils import *
-from data_manager import UpstoxClient, RedisBrain, DataFetcher
+from data_manager import UpstoxClient, RedisBrain, DataFetcher, InMemoryOITracker
 from analyzers import OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, MarketAnalyzer
 from signal_engine import SignalGenerator, SignalValidator
 from position_tracker import PositionTracker
@@ -23,7 +23,12 @@ class NiftyTradingBot:
     """Main bot orchestrator - FIXED EDITION"""
     
     def __init__(self):
+        # 🆕 In-Memory OI Tracker (No Redis needed!)
+        self.oi_tracker = InMemoryOITracker()
+        
+        # Redis Brain (deprecated, keeping for compatibility)
         self.memory = RedisBrain()
+        
         self.upstox = None
         self.data_fetcher = None
         
@@ -283,17 +288,58 @@ class NiftyTradingBot:
         
         logger.info("📊 Calculating OI changes...")
         
-        ce_5m, pe_5m, has_5m = self.memory.get_total_oi_change(total_ce, total_pe, 5)
-        ce_15m, pe_15m, has_15m = self.memory.get_total_oi_change(total_ce, total_pe, 15)
+        # 🆕 USE IN-MEMORY TRACKER instead of Redis
+        prev_total_ce, prev_total_pe, prev_atm_ce, prev_atm_pe, has_history = self.oi_tracker.get_comparison(minutes_ago=5)
         
-        # 🔧 FIX: Use Redis memory for ATM OI changes
+        if has_history:
+            # Calculate 5-minute changes
+            ce_5m = ((total_ce - prev_total_ce) / prev_total_ce * 100) if prev_total_ce > 0 else 0.0
+            pe_5m = ((total_pe - prev_total_pe) / prev_total_pe * 100) if prev_total_pe > 0 else 0.0
+            has_5m = True
+            
+            # ATM changes
+            atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
+            current_atm_ce = atm_data.get('ce_oi', 0)
+            current_atm_pe = atm_data.get('pe_oi', 0)
+            
+            atm_ce_5m = ((current_atm_ce - prev_atm_ce) / prev_atm_ce * 100) if prev_atm_ce > 0 else 0.0
+            atm_pe_5m = ((current_atm_pe - prev_atm_pe) / prev_atm_pe * 100) if prev_atm_pe > 0 else 0.0
+            has_atm_5m = True
+        else:
+            ce_5m = pe_5m = atm_ce_5m = atm_pe_5m = 0.0
+            has_5m = has_atm_5m = False
+        
+        # Get 15-minute comparison
+        prev_total_ce_15, prev_total_pe_15, prev_atm_ce_15, prev_atm_pe_15, has_history_15 = self.oi_tracker.get_comparison(minutes_ago=15)
+        
+        if has_history_15:
+            ce_15m = ((total_ce - prev_total_ce_15) / prev_total_ce_15 * 100) if prev_total_ce_15 > 0 else 0.0
+            pe_15m = ((total_pe - prev_total_pe_15) / prev_total_pe_15 * 100) if prev_total_pe_15 > 0 else 0.0
+            
+            atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
+            current_atm_ce = atm_data.get('ce_oi', 0)
+            current_atm_pe = atm_data.get('pe_oi', 0)
+            
+            atm_ce_15m = ((current_atm_ce - prev_atm_ce_15) / prev_atm_ce_15 * 100) if prev_atm_ce_15 > 0 else 0.0
+            atm_pe_15m = ((current_atm_pe - prev_atm_pe_15) / prev_atm_pe_15 * 100) if prev_atm_pe_15 > 0 else 0.0
+            has_15m = has_atm_15m = True
+        else:
+            ce_15m = pe_15m = atm_ce_15m = atm_pe_15m = 0.0
+            has_15m = has_atm_15m = False
+        
+        # 🆕 SAVE current snapshot for next comparison
         atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
-        atm_ce_5m, atm_pe_5m, has_atm_5m = self.memory.get_strike_oi_change(atm, atm_data, 5)
-        atm_ce_15m, atm_pe_15m, has_atm_15m = self.memory.get_strike_oi_change(atm, atm_data, 15)
+        self.oi_tracker.save_snapshot(
+            total_ce=total_ce,
+            total_pe=total_pe,
+            atm_strike=atm,
+            atm_ce_oi=atm_data.get('ce_oi', 0),
+            atm_pe_oi=atm_data.get('pe_oi', 0)
+        )
         
         logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
         logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-        logger.info(f"  ATM: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_atm_15m else '⏳'}")
+        logger.info(f"  ATM: CE={atm_ce_5m:+.1f}% PE={atm_pe_5m:+.1f}% {'✅' if has_atm_5m else '⏳'}")
         
         # ========== PRICE-AWARE OI ANALYSIS ==========
         
@@ -335,18 +381,11 @@ class NiftyTradingBot:
         
         vol_trend = self.volume_analyzer.analyze_volume_trend(futures_df, futures_ltp=futures_ltp)
         
-        # 🔍 VOLUME DEBUG
-        logger.info(f"\n🔍 VOLUME DEBUG:")
-        logger.info(f"  Total candles: {len(futures_df)}")
-        logger.info(f"  Last 7 volumes: {futures_df['volume'].tail(7).tolist()}")
-        logger.info(f"  Skipped stale: {vol_trend.get('skipped_candles', 1)} candles")
-        logger.info(f"  Avg volume: {vol_trend['avg_volume']}")
-        logger.info(f"  Current volume: {vol_trend['current_volume']}")
-        logger.info(f"  Calculated ratio: {vol_trend['ratio']}")
+        # ⚠️ VOLUME DISABLED (Upstox API returns stale data)
+        logger.info(f"\n⚠️ Volume analysis: DISABLED (unreliable data)")
+        logger.info(f"  Confirmation via: OI + Price direction only")
         
-        vol_spike, vol_ratio = self.volume_analyzer.detect_volume_spike(
-            vol_trend['current_volume'], vol_trend['avg_volume']
-        )
+        vol_spike, vol_ratio = False, 1.0  # Disabled
         order_flow = self.volume_analyzer.calculate_order_flow(strike_data)
         
         gamma = self.market_analyzer.detect_gamma_zone()
