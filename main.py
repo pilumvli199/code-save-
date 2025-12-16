@@ -10,7 +10,7 @@ from config import *
 from utils import *
 from data_manager import UpstoxClient, RedisBrain, DataFetcher, InMemoryOITracker
 from analyzers import OIAnalyzer, VolumeAnalyzer, TechnicalAnalyzer, MarketAnalyzer
-from signal_engine_v6 import SignalGenerator, SignalValidator  # 🔥 v6
+from signal_engine import SignalGenerator, SignalValidator  # 🔥 v6
 from position_tracker import PositionTracker
 from alerts import TelegramBot, MessageFormatter
 
