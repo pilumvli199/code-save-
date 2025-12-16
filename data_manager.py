@@ -1,6 +1,11 @@
 """
-Data Manager: Upstox API + Redis Memory + PRICE TRACKING
-UPGRADED: Price history tracking, price change calculation, comparison logic
+Data Manager v7.0: COMPREHENSIVE FIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🆕 FIXED:
+- InMemoryOITracker: 20 → 35 scans (30m support)
+- Added 30m comparison method
+- Improved tolerance for data lookup
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 import asyncio
@@ -34,12 +39,17 @@ class UpstoxClient:
         self._rate_limit_delay = 0.1
         self._last_request = 0
         
-        # Instrument keys
         self.spot_key = None
         self.index_key = None
         self.futures_key = None
         self.futures_expiry = None
         self.futures_symbol = None
+    
+    async def initialize(self):
+        """Initialize session and detect instruments"""
+        self.session = aiohttp.ClientSession()
+        success = await self.detect_instruments()
+        return success
     
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -168,12 +178,9 @@ class UpstoxClient:
                 logger.error("❌ No futures contracts found")
                 return False
             
-            # Sort by expiry
             all_futures.sort(key=lambda x: x['expiry'])
             
-            # Select MONTHLY (> 10 days)
             monthly_futures = None
-            
             for fut in all_futures:
                 if fut['days_to_expiry'] > 10:
                     monthly_futures = fut
@@ -197,7 +204,7 @@ class UpstoxClient:
             return False
     
     async def get_quote(self, instrument_key):
-        """Get market quote (for spot/futures LIVE price)"""
+        """Get market quote"""
         if not instrument_key:
             return None
         
@@ -211,16 +218,13 @@ class UpstoxClient:
         
         quotes = data['data']
         
-        # Try exact match
         if instrument_key in quotes:
             return quotes[instrument_key]
         
-        # Try colon format
         alt_key = instrument_key.replace('|', ':')
         if alt_key in quotes:
             return quotes[alt_key]
         
-        # Try segment match
         segment = instrument_key.split('|')[0] if '|' in instrument_key else instrument_key.split(':')[0]
         for key in quotes.keys():
             if key.startswith(segment):
@@ -245,7 +249,7 @@ class UpstoxClient:
         return data['data']
     
     async def get_option_chain(self, instrument_key, expiry_date):
-        """Get option chain (WEEKLY options)"""
+        """Get option chain"""
         if not instrument_key:
             return None
         
@@ -273,16 +277,18 @@ class UpstoxClient:
 # ==================== In-Memory OI Tracker ====================
 class InMemoryOITracker:
     """
-    🆕 In-Memory OI History Tracker - NO REDIS NEEDED!
+    🆕 UPGRADED: In-Memory OI History Tracker with 30m support
     
-    Keeps last 20 scans in RAM for 5m/15m comparison
-    Perfect for intraday trading (data clears daily)
+    Changes:
+    - 20 → 35 scans (35 minutes of history)
+    - Better tolerance for data lookup (±5 min)
+    - Support for 30m comparison
     """
     
     def __init__(self):
-        self.history = []  # [(timestamp, total_ce, total_pe, atm_strike, atm_ce, atm_pe), ...]
-        self.max_history = 20  # Keep 20 minutes of data
-        logger.info("💾 In-Memory OI Tracker initialized (20 scans history)")
+        self.history = []
+        self.max_history = OI_MEMORY_SCANS  # 🔧 FIX: Was 20, now 35
+        logger.info(f"💾 In-Memory OI Tracker initialized ({self.max_history} scans = 30m+ support)")
     
     def save_snapshot(self, total_ce, total_pe, atm_strike, atm_ce_oi, atm_pe_oi):
         """Save current OI snapshot"""
@@ -299,15 +305,18 @@ class InMemoryOITracker:
         
         self.history.append(snapshot)
         
-        # Keep only last 20
+        # Keep only last max_history scans
         if len(self.history) > self.max_history:
             self.history.pop(0)
         
-        logger.debug(f"💾 Saved snapshot #{len(self.history)}: ATM {atm_strike}, Total CE={total_ce:,}, PE={total_pe:,}")
+        logger.debug(f"💾 Saved snapshot #{len(self.history)}/{self.max_history}: ATM {atm_strike}, Total CE={total_ce:,}, PE={total_pe:,}")
     
     def get_comparison(self, minutes_ago=5):
         """
-        Get OI from N minutes ago
+        🆕 IMPROVED: Get OI from N minutes ago with better tolerance
+        
+        Now supports: 5m, 15m, 30m comparisons
+        Tolerance: ±5 minutes (was ±3)
         
         Returns: (total_ce, total_pe, atm_ce, atm_pe, found)
         """
@@ -317,18 +326,24 @@ class InMemoryOITracker:
         target_time = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target_time = target_time.replace(second=0, microsecond=0)
         
-        # Find closest snapshot (±3 min tolerance)
+        # 🔧 FIX: Increased tolerance to ±5 minutes (was ±3)
         best_match = None
         min_diff = 999
         
         for snapshot in self.history:
             diff = abs((snapshot['timestamp'] - target_time).total_seconds() / 60)
-            if diff < min_diff and diff <= 3:  # Within 3 minutes
+            if diff < min_diff and diff <= OI_MEMORY_BUFFER:  # Within 5 minutes
                 min_diff = diff
                 best_match = snapshot
         
         if not best_match:
+            # 🆕 DEBUG: Log if no match found
+            logger.debug(f"⏳ No {minutes_ago}m data (need {minutes_ago}+ min history)")
             return 0, 0, 0, 0, False
+        
+        # 🆕 DEBUG: Log match info
+        if min_diff > 2:
+            logger.debug(f"✅ {minutes_ago}m: Found with {min_diff:.1f}m tolerance")
         
         return (
             best_match['total_ce'],
@@ -339,35 +354,53 @@ class InMemoryOITracker:
         )
     
     def is_ready(self, minutes=5):
-        """Check if we have enough history"""
+        """Check if we have enough history for N-minute comparison"""
         if len(self.history) < 2:
             return False
         
         elapsed = (datetime.now(IST) - self.history[0]['timestamp']).total_seconds() / 60
         return elapsed >= minutes
-
-
-# ==================== Redis Brain (DEPRECATED - Using In-Memory) ====================
-class RedisBrain:
-    """
-    🗑️ DEPRECATED: Redis memory manager
-    NOW USING: InMemoryOITracker for OI comparisons
     
-    Keeping this for price tracking only
-    """
+    def get_status(self):
+        """Get tracker status"""
+        if not self.history:
+            return {
+                'scans': 0,
+                'oldest': None,
+                'newest': None,
+                'ready_5m': False,
+                'ready_15m': False,
+                'ready_30m': False
+            }
+        
+        oldest = self.history[0]['timestamp']
+        newest = self.history[-1]['timestamp']
+        elapsed = (newest - oldest).total_seconds() / 60
+        
+        return {
+            'scans': len(self.history),
+            'oldest': oldest.strftime('%H:%M'),
+            'newest': newest.strftime('%H:%M'),
+            'elapsed_min': elapsed,
+            'ready_5m': self.is_ready(5),
+            'ready_15m': self.is_ready(15),
+            'ready_30m': self.is_ready(30)
+        }
+
+
+# ==================== Redis Brain ====================
+class RedisBrain:
+    """Redis/RAM memory manager for price tracking"""
     
     def __init__(self):
         self.client = None
         self.memory = {}
         self.memory_timestamps = {}
-        self.snapshot_count = 0
-        self.first_snapshot_time = None
-        self.premarket_loaded = False
         
-        # 🆕 PRICE TRACKING
-        self.price_history = []  # [(timestamp, price), ...]
+        self.price_history = []
         self.last_price = None
         self.first_price = None
+        self.session_open = None
         
         if REDIS_AVAILABLE and REDIS_URL:
             try:
@@ -381,23 +414,20 @@ class RedisBrain:
             logger.info(f"💾 RAM mode (TTL: {MEMORY_TTL_HOURS}h)")
     
     def save_price(self, price):
-        """🆕 Save price snapshot with timestamp"""
+        """Save price snapshot"""
         now = datetime.now(IST).replace(second=0, microsecond=0)
         
-        # Store in history
         self.price_history.append((now, price))
         
-        # Keep only last 24 hours
         cutoff = now - timedelta(hours=24)
         self.price_history = [(t, p) for t, p in self.price_history if t > cutoff]
         
-        # Update trackers
         self.last_price = price
         if self.first_price is None:
             self.first_price = price
-            logger.info(f"📍 FIRST PRICE: ₹{price:.2f}")
+            self.session_open = price
+            logger.info(f"📍 SESSION OPEN: ₹{price:.2f}")
         
-        # Save to Redis/RAM
         key = f"nifty:price:{now.strftime('%Y%m%d_%H%M')}"
         value = json.dumps({'price': price, 'timestamp': now.isoformat()})
         
@@ -411,15 +441,14 @@ class RedisBrain:
             self.memory[key] = value
             self.memory_timestamps[key] = time_module.time()
     
-    def get_price_change(self, minutes_ago=5):
-        """🆕 Get price change % from N minutes ago"""
-        if not self.last_price:
+    def get_price_change(self, current_price, minutes_ago=5):
+        """Get price change % from N minutes ago"""
+        if not current_price:
             return 0.0, False
         
         target = datetime.now(IST) - timedelta(minutes=minutes_ago)
         target = target.replace(second=0, microsecond=0)
         
-        # Try Redis/RAM first
         key = f"nifty:price:{target.strftime('%Y%m%d_%H%M')}"
         
         past_str = None
@@ -451,22 +480,6 @@ class RedisBrain:
                     if past_str:
                         break
         
-        # Fallback: Search history directly
-        if not past_str and self.price_history:
-            closest = None
-            min_diff = float('inf')
-            
-            for t, p in self.price_history:
-                diff = abs((t - target).total_seconds())
-                if diff < min_diff:
-                    min_diff = diff
-                    closest = p
-            
-            if closest and min_diff <= 180:  # Within 3 minutes
-                past_price = closest
-                change_pct = ((self.last_price - past_price) / past_price) * 100
-                return round(change_pct, 2), True
-        
         if not past_str:
             return 0.0, False
         
@@ -477,254 +490,12 @@ class RedisBrain:
             if past_price == 0:
                 return 0.0, False
             
-            change_pct = ((self.last_price - past_price) / past_price) * 100
+            change_pct = ((current_price - past_price) / past_price) * 100
             return round(change_pct, 2), True
         
         except Exception as e:
             logger.error(f"❌ Price parse error: {e}")
             return 0.0, False
-    
-    def get_price_stats(self):
-        """🆕 Get price statistics"""
-        if not self.last_price:
-            return {
-                'current': 0,
-                'first': 0,
-                'change_from_open': 0.0,
-                'history_count': 0
-            }
-        
-        change_from_open = 0.0
-        if self.first_price:
-            change_from_open = ((self.last_price - self.first_price) / self.first_price) * 100
-        
-        return {
-            'current': self.last_price,
-            'first': self.first_price,
-            'change_from_open': round(change_from_open, 2),
-            'history_count': len(self.price_history)
-        }
-    
-    def save_total_oi(self, ce, pe):
-        """Save total OI snapshot"""
-        now = datetime.now(IST).replace(second=0, microsecond=0)
-        key = f"nifty:total:{now.strftime('%Y%m%d_%H%M')}"
-        value = json.dumps({'ce': ce, 'pe': pe, 'timestamp': now.isoformat()})
-        
-        if self.snapshot_count == 0:
-            self.first_snapshot_time = now
-            logger.info(f"📍 FIRST SNAPSHOT at {now.strftime('%H:%M')}")
-        
-        if self.client:
-            try:
-                self.client.setex(key, MEMORY_TTL_SECONDS, value)
-            except:
-                self.memory[key] = value
-                self.memory_timestamps[key] = time_module.time()
-        else:
-            self.memory[key] = value
-            self.memory_timestamps[key] = time_module.time()
-        
-        self.snapshot_count += 1
-        
-        if self.snapshot_count == 1:
-            logger.info(f"💾 First snapshot: CE={ce:,.0f}, PE={pe:,.0f}")
-        
-        self._cleanup()
-    
-    def get_total_oi_change(self, current_ce, current_pe, minutes_ago=15):
-        """Get OI change with tolerance"""
-        target = datetime.now(IST) - timedelta(minutes=minutes_ago)
-        target = target.replace(second=0, microsecond=0)
-        key = f"nifty:total:{target.strftime('%Y%m%d_%H%M')}"
-        
-        past_str = None
-        if self.client:
-            try:
-                past_str = self.client.get(key)
-            except:
-                pass
-        
-        if not past_str:
-            past_str = self.memory.get(key)
-        
-        # Try tolerance
-        if not past_str:
-            for offset in [-1, 1, -2, 2]:
-                alt = target + timedelta(minutes=offset)
-                alt_key = f"nifty:total:{alt.strftime('%Y%m%d_%H%M')}"
-                
-                if self.client:
-                    try:
-                        past_str = self.client.get(alt_key)
-                        if past_str:
-                            break
-                    except:
-                        pass
-                
-                if not past_str:
-                    past_str = self.memory.get(alt_key)
-                    if past_str:
-                        break
-        
-        if not past_str:
-            return 0.0, 0.0, False
-        
-        try:
-            past = json.loads(past_str)
-            past_ce = past.get('ce', 0)
-            past_pe = past.get('pe', 0)
-            
-            if past_ce == 0:
-                ce_chg = 100.0 if current_ce > 0 else 0.0
-            else:
-                ce_chg = ((current_ce - past_ce) / past_ce * 100)
-            
-            if past_pe == 0:
-                pe_chg = 100.0 if current_pe > 0 else 0.0
-            else:
-                pe_chg = ((current_pe - past_pe) / past_pe * 100)
-            
-            return round(ce_chg, 1), round(pe_chg, 1), True
-        
-        except Exception as e:
-            logger.error(f"❌ Parse error: {e}")
-            return 0.0, 0.0, False
-    
-    def save_strike(self, strike, data):
-        """Save strike OI"""
-        now = datetime.now(IST).replace(second=0, microsecond=0)
-        key = f"nifty:strike:{strike}:{now.strftime('%Y%m%d_%H%M')}"
-        
-        data_with_ts = data.copy()
-        data_with_ts['timestamp'] = now.isoformat()
-        value = json.dumps(data_with_ts)
-        
-        if self.client:
-            try:
-                self.client.setex(key, MEMORY_TTL_SECONDS, value)
-            except:
-                self.memory[key] = value
-                self.memory_timestamps[key] = time_module.time()
-        else:
-            self.memory[key] = value
-            self.memory_timestamps[key] = time_module.time()
-    
-    def get_strike_oi_change(self, strike, current_data, minutes_ago=15):
-        """
-        🔧 FIX: Get strike OI change with extended tolerance
-        
-        Problem: First 5-10 minutes data not found due to narrow ±2min tolerance
-        Solution: Increased tolerance to ±5 minutes + debug logging
-        """
-        target = datetime.now(IST) - timedelta(minutes=minutes_ago)
-        target = target.replace(second=0, microsecond=0)
-        key = f"nifty:strike:{strike}:{target.strftime('%Y%m%d_%H%M')}"
-        
-        past_str = None
-        if self.client:
-            try:
-                past_str = self.client.get(key)
-            except:
-                pass
-        
-        if not past_str:
-            past_str = self.memory.get(key)
-        
-        # 🔧 FIX: Increased tolerance ±2 → ±5 minutes
-        if not past_str:
-            found_key = None
-            for offset in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5]:
-                alt = target + timedelta(minutes=offset)
-                alt_key = f"nifty:strike:{strike}:{alt.strftime('%Y%m%d_%H%M')}"
-                
-                if self.client:
-                    try:
-                        past_str = self.client.get(alt_key)
-                        if past_str:
-                            found_key = alt_key
-                            break
-                    except:
-                        pass
-                
-                if not past_str:
-                    past_str = self.memory.get(alt_key)
-                    if past_str:
-                        found_key = alt_key
-                        break
-            
-            # 🔧 DEBUG: Log if found with tolerance
-            if found_key:
-                logger.debug(f"✅ ATM {strike}: Found with offset key: {found_key}")
-        
-        if not past_str:
-            # 🔧 DEBUG: Log missing data
-            logger.debug(f"⏳ ATM {strike}: No {minutes_ago}m data yet (warmup)")
-            return 0.0, 0.0, False
-        
-        try:
-            past = json.loads(past_str)
-            
-            ce_past = past.get('ce_oi', 0)
-            pe_past = past.get('pe_oi', 0)
-            ce_curr = current_data.get('ce_oi', 0)
-            pe_curr = current_data.get('pe_oi', 0)
-            
-            if ce_past == 0:
-                ce_chg = 100.0 if ce_curr > 0 else 0.0
-            else:
-                ce_chg = ((ce_curr - ce_past) / ce_past * 100)
-            
-            if pe_past == 0:
-                pe_chg = 100.0 if pe_curr > 0 else 0.0
-            else:
-                pe_chg = ((pe_curr - pe_past) / pe_past * 100)
-            
-            return round(ce_chg, 1), round(pe_chg, 1), True
-        
-        except Exception as e:
-            logger.error(f"❌ ATM {strike} parse error: {e}")
-            return 0.0, 0.0, False
-    
-    def is_warmed_up(self, minutes=15):
-        """Check warmup from first snapshot"""
-        if not self.first_snapshot_time:
-            return False
-        
-        elapsed = (datetime.now(IST) - self.first_snapshot_time).total_seconds() / 60
-        
-        if elapsed < minutes:
-            return False
-        
-        test_time = datetime.now(IST) - timedelta(minutes=minutes)
-        test_key = f"nifty:total:{test_time.strftime('%Y%m%d_%H%M')}"
-        
-        has_data = False
-        if self.client:
-            try:
-                has_data = self.client.exists(test_key) > 0
-            except:
-                has_data = test_key in self.memory
-        else:
-            has_data = test_key in self.memory
-        
-        return has_data
-    
-    def get_stats(self):
-        """Get memory stats"""
-        if not self.first_snapshot_time:
-            elapsed = 0
-        else:
-            elapsed = (datetime.now(IST) - self.first_snapshot_time).total_seconds() / 60
-        
-        return {
-            'snapshot_count': self.snapshot_count,
-            'elapsed_minutes': elapsed,
-            'first_snapshot_time': self.first_snapshot_time,
-            'warmed_up_5m': self.is_warmed_up(5),
-            'warmed_up_10m': self.is_warmed_up(10),
-            'warmed_up_15m': self.is_warmed_up(15)
-        }
     
     def _cleanup(self):
         """Clean expired RAM entries"""
@@ -739,13 +510,6 @@ class RedisBrain:
         
         if expired:
             logger.info(f"🧹 Cleaned {len(expired)} expired entries")
-    
-    async def load_previous_day_data(self):
-        """Skip previous day data"""
-        if self.premarket_loaded:
-            return
-        logger.info("📚 Skipping previous day data")
-        self.premarket_loaded = True
 
 
 # ==================== Data Fetcher ====================
@@ -779,27 +543,12 @@ class DataFetcher:
             return None
     
     async def fetch_futures_candles(self):
-        """
-        🔧 FIX: Fetch MONTHLY futures candles with FRESH data
-        
-        Problem: get_candles() returns cached data with stale volumes
-        Solution: Use intraday endpoint with explicit to_date=NOW
-        """
+        """Fetch MONTHLY futures candles"""
         try:
             if not self.client.futures_key:
                 return None
             
-            # 🔧 FIX: Get current IST time for fresh data
-            from datetime import datetime
-            from utils import IST
-            now_ist = datetime.now(IST)
-            to_date = now_ist.strftime('%Y-%m-%d')
-            
-            # Use intraday endpoint with to_date
-            data = await self.client.get_candles(
-                self.client.futures_key, 
-                '1minute'
-            )
+            data = await self.client.get_candles(self.client.futures_key, '1minute')
             
             if not data or 'candles' not in data:
                 logger.warning("❌ No candle data")
@@ -810,16 +559,8 @@ class DataFetcher:
                 logger.warning("❌ Empty candles array")
                 return None
             
-            # Create DataFrame
             df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi'])
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            
-            # 🔧 DEBUG: Log last 3 candles to verify freshness
-            if len(df) >= 3:
-                last_3 = df.tail(3)
-                logger.debug(f"📊 Last 3 candles:")
-                for idx, row in last_3.iterrows():
-                    logger.debug(f"   {row['timestamp'].strftime('%H:%M')}: vol={row['volume']:.0f}")
             
             return df
         
@@ -930,9 +671,13 @@ class DataFetcher:
                 logger.error("❌ ALL OI VALUES ARE ZERO!")
                 return None
             
-            logger.info(f"✅ Parsed {len(strike_data)} strikes (Total OI: {total_oi:,.0f})")
+            # Calculate totals
+            total_ce = sum(d['ce_oi'] for d in strike_data.values())
+            total_pe = sum(d['pe_oi'] for d in strike_data.values())
             
-            return atm, strike_data
+            logger.info(f"✅ Parsed {len(strike_data)} strikes (Total OI: CE={total_ce:,.0f}, PE={total_pe:,.0f})")
+            
+            return strike_data, atm, total_ce, total_pe
         
         except Exception as e:
             logger.error(f"❌ Option chain fetch error: {e}", exc_info=True)
