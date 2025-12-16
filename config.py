@@ -26,18 +26,18 @@ MEMORY_TTL_HOURS = 24
 MEMORY_TTL_SECONDS = MEMORY_TTL_HOURS * 3600
 SCAN_INTERVAL = 60  # seconds
 
-# 🆕 OI MEMORY - Increased for 30m comparison
-OI_MEMORY_SCANS = 35  # 35 scans = 35 minutes (was 20)
+# 🔧 MODIFIED: Warmup reduced to 15 minutes (was 35 for 30m)
+OI_MEMORY_SCANS = 20  # 20 scans = 20 minutes (15m warmup + 5m buffer)
 OI_MEMORY_BUFFER = 5  # Extra buffer for tolerance
 
 # ==================== MARKET TIMINGS ====================
 PREMARKET_START = time(9, 10)
 PREMARKET_END = time(9, 15)
 FIRST_DATA_TIME = time(9, 16)
-SIGNAL_START = time(9, 21)
+SIGNAL_START = time(9, 21)     # 🔥 EARLY SIGNALS from 9:21 AM
 MARKET_CLOSE = time(15, 30)
-WARMUP_MINUTES = 15
-EARLY_SIGNAL_CONFIDENCE = 85
+WARMUP_MINUTES = 15             # 🔧 REDUCED: Was 30, now 15
+EARLY_SIGNAL_CONFIDENCE = 85    # 🔥 HIGH threshold for early signals (before full warmup)
 
 # ==================== STRIKE CONFIGURATION ====================
 STRIKE_GAP = 50
