@@ -75,7 +75,15 @@ class NiftyTradingBot:
             
             # Initialize data fetcher
             self.data_fetcher = DataFetcher(self.upstox)
+            
+        except Exception as e:
+            error_msg = f"❌ Initialization failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if self.telegram.is_enabled():
+                await self.telegram.send(f"<b>⚠️ Bot Startup Failed</b>\n\n{error_msg[:500]}")
+            raise
         
+        # Get contract details
         futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
         
         # 🔧 FIX: Get expiry dates properly
