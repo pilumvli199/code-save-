@@ -74,33 +74,34 @@ class NiftyTradingBot:
             logger.info("✅ Upstox API connected")
             
             # Initialize data fetcher
+            logger.info("📊 Initializing data fetcher...")
             self.data_fetcher = DataFetcher(self.upstox)
+            logger.info("✅ Data fetcher ready")
             
-        except Exception as e:
-            error_msg = f"❌ Initialization failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            if self.telegram.is_enabled():
-                await self.telegram.send(f"<b>⚠️ Bot Startup Failed</b>\n\n{error_msg[:500]}")
-            raise
-        
-        # Get contract details
-        futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
-        
-        # 🔧 FIX: Get expiry dates properly
-        weekly_expiry_str = self.upstox.weekly_expiry.strftime('%d-%b-%Y (%A)') if self.upstox.weekly_expiry else "Auto"
-        futures_expiry_str = self.upstox.futures_expiry.strftime('%d-%b-%Y') if self.upstox.futures_expiry else "Auto"
-        futures_days = (self.upstox.futures_expiry - get_ist_time()).days if self.upstox.futures_expiry else 0
-        
-        current_time = format_time_ist(get_ist_time())
-        
-        example_atm = 24150
-        deep_strikes = get_deep_analysis_strikes(example_atm)
-        deep_range = f"{deep_strikes[0]}-{deep_strikes[-1]}"
-        
-        fetch_min, fetch_max = get_strike_range_fetch(example_atm)
-        otm_above, otm_below = get_otm_strikes(example_atm)
-        
-        startup_msg = f"""
+            # Get contract details
+            logger.info("📅 Loading contract details...")
+            futures_contract = self.upstox.futures_symbol if self.upstox.futures_symbol else "NIFTY FUTURES"
+            
+            # Get expiry dates properly
+            weekly_expiry_str = self.upstox.weekly_expiry.strftime('%d-%b-%Y (%A)') if self.upstox.weekly_expiry else "Auto"
+            futures_expiry_str = self.upstox.futures_expiry.strftime('%d-%b-%Y') if self.upstox.futures_expiry else "Auto"
+            futures_days = (self.upstox.futures_expiry - get_ist_time()).days if self.upstox.futures_expiry else 0
+            
+            logger.info(f"  📌 Futures: {futures_contract} (Expiry: {futures_expiry_str}, {futures_days} days left)")
+            logger.info(f"  📌 Options: Weekly expiry {weekly_expiry_str}")
+            
+            current_time = format_time_ist(get_ist_time())
+            
+            example_atm = 24150
+            deep_strikes = get_deep_analysis_strikes(example_atm)
+            deep_range = f"{deep_strikes[0]}-{deep_strikes[-1]}"
+            
+            fetch_min, fetch_max = get_strike_range_fetch(example_atm)
+            otm_above, otm_below = get_otm_strikes(example_atm)
+            
+            # Build startup message
+            logger.info("📱 Preparing Telegram startup message...")
+            startup_msg = f"""
 🚀 <b>NIFTY BOT v{BOT_VERSION}</b>
 
 ━━━━━━━━━━━━━━━━━━━━
@@ -208,13 +209,28 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
 🔄 Scan Interval: {SCAN_INTERVAL}s
 📡 Ready for market data...
 """
-        
-        if self.telegram.is_enabled():
-            await self.telegram.send(startup_msg)
-        
-        logger.info("✅ Bot initialized (v7.0 COMPREHENSIVE FIX)")
-        logger.info(f"📅 Futures: {futures_contract}")
-        logger.info("=" * 60)
+            
+            # Send startup message
+            if self.telegram.is_enabled():
+                logger.info("📤 Sending startup message to Telegram...")
+                sent = await self.telegram.send(startup_msg)
+                if sent:
+                    logger.info("✅ Startup message sent to Telegram")
+                else:
+                    logger.warning("⚠️ Failed to send Telegram message (check bot token/chat ID)")
+            else:
+                logger.info("⏸️ Telegram disabled - Skipping startup message")
+            
+            logger.info("✅ Bot initialized (v7.0 COMPREHENSIVE FIX)")
+            logger.info(f"📅 Futures: {futures_contract}")
+            logger.info("=" * 60)
+            
+        except Exception as e:
+            error_msg = f"❌ Initialization failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            if self.telegram.is_enabled():
+                await self.telegram.send(f"<b>⚠️ Bot Startup Failed</b>\n\n{error_msg[:500]}")
+            raise
     
     async def shutdown(self):
         """Shutdown bot"""
@@ -235,7 +251,7 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             
             logger.info("")
             logger.info("=" * 60)
-            logger.info(f"⏰ {time_str} | {market_status}")
+            logger.info(f"⏰ SCAN #{self.oi_tracker.get_status()['scans']+1} | {time_str} | {market_status}")
             logger.info("=" * 60)
             
             if market_status == "CLOSED":
@@ -247,15 +263,24 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             logger.info("📥 Fetching market data...")
             
             spot = await self.data_fetcher.fetch_spot()
-            futures_df = await self.data_fetcher.fetch_futures_candles()
-            futures_ltp = await self.data_fetcher.fetch_futures_ltp()
-            
-            if not spot or not futures_ltp or futures_df is None:
-                logger.error("❌ Failed to fetch basic data")
+            if not spot:
+                logger.error("❌ Failed to fetch spot price")
                 return
             
             logger.info(f"  ✅ Spot: ₹{spot:.2f}")
+            
+            futures_df = await self.data_fetcher.fetch_futures_candles()
+            if futures_df is None:
+                logger.error("❌ Failed to fetch futures candles")
+                return
+            
             logger.info(f"  ✅ Futures Candles: {len(futures_df)} bars")
+            
+            futures_ltp = await self.data_fetcher.fetch_futures_ltp()
+            if not futures_ltp:
+                logger.error("❌ Failed to fetch futures LTP")
+                return
+            
             logger.info(f"  ✅ Futures LIVE: ₹{futures_ltp:.2f}")
             
             # Save price
@@ -264,14 +289,18 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             # Price changes
             price_5m, has_price_5m = self.memory.get_price_change(futures_ltp, 5)
             price_15m, has_price_15m = self.memory.get_price_change(futures_ltp, 15)
-            price_30m, has_price_30m = self.memory.get_price_change(futures_ltp, 30)  # 🆕 NEW
+            price_30m, has_price_30m = self.memory.get_price_change(futures_ltp, 30)
             
-            logger.info(f"  📈 Price Changes:")
-            logger.info(f"     5m:  {price_5m:+.2f}% {'✅' if has_price_5m else '⏳'}")
-            logger.info(f"     15m: {price_15m:+.2f}% {'✅' if has_price_15m else '⏳'}")
-            logger.info(f"     🆕 30m: {price_30m:+.2f}% {'✅' if has_price_30m else '⏳'}")
+            logger.info(f"")
+            logger.info(f"📈 PRICE CHANGES:")
+            logger.info(f"  5m:  {price_5m:+.2f}% {'✅' if has_price_5m else '⏳'}")
+            logger.info(f"  15m: {price_15m:+.2f}% {'✅' if has_price_15m else '⏳'}")
+            logger.info(f"  30m: {price_30m:+.2f}% {'✅' if has_price_30m else '⏳'}")
             
             # ========== OPTION CHAIN ==========
+            
+            logger.info("")
+            logger.info("📡 Fetching option chain...")
             
             option_result = await self.data_fetcher.fetch_option_chain(spot)
             
@@ -290,14 +319,15 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             
             # ========== OI CALCULATION (5m, 15m, 30m) ==========
             
-            logger.info("📊 Calculating OI changes...")
+            logger.info("")
+            logger.info("📊 CALCULATING OI CHANGES...")
             
-            # 🆕 GET ATM data first
+            # Get ATM data first
             atm_data = self.oi_analyzer.get_atm_data(strike_data, atm)
             current_atm_ce = atm_data.get('ce_oi', 0)
             current_atm_pe = atm_data.get('pe_oi', 0)
             
-            # ━━━━━━━━━━━━ 5-MINUTE COMPARISON ━━━━━━━━━━━━
+            # 5-minute comparison
             prev_total_ce_5m, prev_total_pe_5m, prev_atm_ce_5m, prev_atm_pe_5m, has_5m = self.oi_tracker.get_comparison(minutes_ago=5)
             
             if has_5m:
@@ -309,7 +339,7 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             else:
                 ce_5m = pe_5m = atm_ce_5m = atm_pe_5m = 0.0
             
-            # ━━━━━━━━━━━━ 15-MINUTE COMPARISON ━━━━━━━━━━━━
+            # 15-minute comparison
             prev_total_ce_15m, prev_total_pe_15m, prev_atm_ce_15m, prev_atm_pe_15m, has_15m = self.oi_tracker.get_comparison(minutes_ago=15)
             
             if has_15m:
@@ -321,19 +351,16 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             else:
                 ce_15m = pe_15m = atm_ce_15m = atm_pe_15m = 0.0
             
-            # ━━━━━━━━━━━━ 🆕 30-MINUTE COMPARISON ━━━━━━━━━━━━
+            # 30-minute comparison
             prev_total_ce_30m, prev_total_pe_30m, prev_atm_ce_30m, prev_atm_pe_30m, has_30m = self.oi_tracker.get_comparison(minutes_ago=30)
             
             if has_30m:
                 ce_30m = ((total_ce - prev_total_ce_30m) / prev_total_ce_30m * 100) if prev_total_ce_30m > 0 else 0.0
                 pe_30m = ((total_pe - prev_total_pe_30m) / prev_total_pe_30m * 100) if prev_total_pe_30m > 0 else 0.0
-                
-                logger.info(f"  🆕 30m: CE={ce_30m:+.1f}% PE={pe_30m:+.1f}% ✅")
             else:
                 ce_30m = pe_30m = 0.0
-                logger.info(f"  🆕 30m: Waiting... (need 30+ min history) ⏳")
             
-            # 🆕 SAVE current snapshot
+            # Save current snapshot
             self.oi_tracker.save_snapshot(
                 total_ce=total_ce,
                 total_pe=total_pe,
@@ -346,9 +373,15 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             tracker_status = self.oi_tracker.get_status()
             logger.info(f"  💾 Tracker: {tracker_status['scans']}/{OI_MEMORY_SCANS} scans | 5m✅ 15m{'✅' if tracker_status['ready_15m'] else '⏳'} 30m{'✅' if tracker_status['ready_30m'] else '⏳'}")
             
-            logger.info(f"  5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
-            logger.info(f"  15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
-            logger.info(f"  ATM: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
+            logger.info(f"")
+            logger.info(f"  TOTAL OI CHANGES:")
+            logger.info(f"    5m:  CE={ce_5m:+.1f}% PE={pe_5m:+.1f}% {'✅' if has_5m else '⏳'}")
+            logger.info(f"    15m: CE={ce_15m:+.1f}% PE={pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
+            logger.info(f"    30m: CE={ce_30m:+.1f}% PE={pe_30m:+.1f}% {'✅' if has_30m else '⏳'}")
+            
+            logger.info(f"")
+            logger.info(f"  ATM {atm} OI CHANGES:")
+            logger.info(f"    15m: CE={atm_ce_15m:+.1f}% PE={atm_pe_15m:+.1f}% {'✅' if has_15m else '⏳'}")
             
             # ========== PRICE-AWARE OI ANALYSIS ==========
             
