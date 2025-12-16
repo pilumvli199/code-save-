@@ -150,29 +150,3 @@ def format_expiry_display(expiry_date):
     
     except Exception:
         return expiry_date
-
-
-# Test function
-if __name__ == "__main__":
-    print("="*60)
-    print("🔥 Auto Expiry Calculator Test")
-    print("="*60)
-    
-    today = datetime.now(IST)
-    print(f"Today: {today.strftime('%A, %d-%b-%Y %I:%M %p IST')}")
-    print()
-    
-    weekly = get_next_weekly_expiry()
-    monthly = get_next_monthly_expiry()
-    
-    print(f"📅 NIFTY 50 Weekly Expiry (Tuesday):")
-    print(f"   Date: {weekly}")
-    print(f"   Display: {format_expiry_display(weekly)}")
-    print()
-    
-    print(f"📅 NIFTY Monthly Expiry (Last Thursday):")
-    print(f"   Date: {monthly}")
-    print(f"   Display: {format_expiry_display(monthly)}")
-    print()
-    
-    print("="*60)
