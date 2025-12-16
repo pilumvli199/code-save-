@@ -472,6 +472,20 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
                 logger.info("  ⏸️ Already in position - Skipping")
                 return
             
+            # 🔥 NEW: Check warmup status
+            tracker_status = self.oi_tracker.get_status()
+            is_fully_warmed = tracker_status['ready_15m']  # 15m warmup
+            current_time = get_ist_time().time()
+            is_early_time = SIGNAL_START <= current_time < time(9, 31)  # 9:21 - 9:30 = early period
+            
+            if not is_fully_warmed:
+                if is_early_time:
+                    logger.info(f"  ⚡ EARLY SIGNAL MODE: Need {EARLY_SIGNAL_CONFIDENCE}%+ confidence")
+                else:
+                    logger.info(f"  ⏳ Warmup incomplete: {tracker_status['elapsed_min']:.0f}/{WARMUP_MINUTES} min")
+                    logger.info(f"     5m: {'✅' if tracker_status['ready_5m'] else '⏳'} | 15m: {'✅' if tracker_status['ready_15m'] else '⏳'}")
+                    return
+            
             multi_tf = has_5m and has_15m
             
             signal = self.signal_gen.generate(
@@ -513,6 +527,14 @@ Warmup: 5m ⏳ | 15m ⏳ | 30m ⏳
             if not signal:
                 logger.info("  ⏹️ No valid setup at this time")
                 return
+            
+            # 🔥 NEW: Early signal filter (9:21-9:30)
+            if is_early_time and not is_fully_warmed:
+                if signal.confidence < EARLY_SIGNAL_CONFIDENCE:
+                    logger.info(f"  🚫 Early signal rejected: Confidence {signal.confidence}% < {EARLY_SIGNAL_CONFIDENCE}% (early threshold)")
+                    return
+                else:
+                    logger.info(f"  ⚡ EARLY HIGH-CONFIDENCE SIGNAL: {signal.confidence}% ≥ {EARLY_SIGNAL_CONFIDENCE}%")
             
             # Validate signal
             should_execute, reason = self.signal_validator.should_execute(signal)
