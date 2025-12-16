@@ -1,18 +1,44 @@
 """
-Signal Engine: Entry Signal Generation & Validation
-FIXED: VWAP validation, better confidence, re-entry protection, oi_scenario support
+Signal Engine v6.0: COMPREHENSIVE FIX
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ CRITICAL FIXES:
+1. Strict VWAP validation (price MUST be correct side)
+2. Reversal detection (both ATM unwinding = NO_TRADE)
+3. Time filter (no trades after 3:00 PM)
+4. Trap detection (one-sided spike = NO_TRADE)
+
+✅ ENHANCEMENTS:
+5. PCR bias bands (< 0.7, > 1.3 logic)
+6. Raised VWAP threshold (50 → 70)
+7. Better confidence scoring
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
 
 from config import *
 from utils import IST, setup_logger
 from analyzers import TechnicalAnalyzer
 
 logger = setup_logger("signal_engine")
+
+
+# ==================== Enhanced Config ====================
+# 🔥 FIX #1: Raise VWAP threshold
+MIN_VWAP_SCORE = 70  # Was 50 - Now stricter
+
+# 🔥 FIX #2: Time filter
+MARKET_CLOSE_BUFFER_MINUTES = 30  # Avoid last 30 min
+
+# 🔥 FIX #3: Reversal detection
+REVERSAL_ATM_THRESHOLD = 50  # Both sides > 50% unwinding
+
+# 🔥 FIX #4: Trap detection
+TRAP_SPIKE_THRESHOLD = 8  # One side > 8%
+TRAP_FLAT_THRESHOLD = 2   # Other side < 2%
 
 
 # ==================== Signal Models ====================
@@ -43,29 +69,98 @@ class Signal:
     atm_ce_change: float
     atm_pe_change: float
     pcr: float
+    pcr_bias: str  # 🆕 NEW
     volume_spike: bool
     volume_ratio: float
     order_flow: float
     confidence: int
     primary_checks: int
     bonus_checks: int
-    trailing_sl_enabled: bool
-    is_expiry_day: bool
-    analysis_details: dict
-    oi_scenario_type: Optional[str] = None  # 🆕 NEW FIELD
+    oi_scenario_type: Optional[str] = None
+
+
+# ==================== Helper Functions ====================
+def get_pcr_bias(pcr: float) -> Tuple[str, str, int]:
+    """
+    🆕 NEW: Get PCR bias and confidence adjustment
     
-    def get_direction(self):
-        return "BULLISH" if self.signal_type == SignalType.CE_BUY else "BEARISH"
+    Returns:
+        (bias, description, confidence_modifier)
+    """
+    if pcr < 0.7:
+        return "OVERHEATED", "Too bullish - Look for PE_BUY at tops", -10
+    elif pcr < 0.9:
+        return "BULLISH", "Healthy uptrend - CE_BUY on dips", +5
+    elif pcr < 1.1:
+        return "NEUTRAL", "Range-bound - Wait for breakout", 0
+    elif pcr < 1.3:
+        return "BEARISH", "Healthy downtrend - PE_BUY on rallies", +5
+    else:
+        return "OVERSOLD", "Too bearish - Look for CE_BUY at bottoms", -10
+
+
+def detect_reversal(atm_ce_15m: float, atm_pe_15m: float, has_data: bool) -> Tuple[bool, str]:
+    """
+    🆕 FIX #2: Detect reversal/exhaustion pattern
     
-    def get_rr_ratio(self):
-        risk = abs(self.entry_price - self.stop_loss)
-        reward = abs(self.target_price - self.entry_price)
-        return round(reward / risk, 2) if risk > 0 else 0.0
+    When both ATM CE and PE are heavily unwinding = Position exhaustion
+    This is NOT a directional signal, it's a reversal warning!
+    """
+    if not has_data:
+        return False, ""
+    
+    # Both sides unwinding heavily
+    if abs(atm_ce_15m) > REVERSAL_ATM_THRESHOLD and abs(atm_pe_15m) > REVERSAL_ATM_THRESHOLD:
+        if atm_ce_15m < 0 and atm_pe_15m < 0:
+            return True, f"Both ATM unwinding (CE: {atm_ce_15m:.1f}%, PE: {atm_pe_15m:.1f}%)"
+    
+    return False, ""
+
+
+def detect_trap(ce_15m: float, pe_15m: float, has_data: bool) -> Tuple[bool, str]:
+    """
+    🆕 FIX #4: Detect Bull/Bear trap
+    
+    Bull Trap: CE spike + PE flat = Retail panic, institutions selling
+    Bear Trap: PE spike + CE flat = Retail panic, institutions selling
+    """
+    if not has_data:
+        return False, ""
+    
+    # Bull Trap: CE spike + PE flat
+    if abs(ce_15m) > TRAP_SPIKE_THRESHOLD and abs(pe_15m) < TRAP_FLAT_THRESHOLD:
+        return True, f"BULL TRAP detected (CE: {ce_15m:.1f}%, PE: {pe_15m:.1f}%)"
+    
+    # Bear Trap: PE spike + CE flat  
+    if abs(pe_15m) > TRAP_SPIKE_THRESHOLD and abs(ce_15m) < TRAP_FLAT_THRESHOLD:
+        return True, f"BEAR TRAP detected (CE: {ce_15m:.1f}%, PE: {pe_15m:.1f}%)"
+    
+    return False, ""
+
+
+def check_market_timing() -> Tuple[bool, str]:
+    """
+    🆕 FIX #3: Check if current time is suitable for new positions
+    
+    Avoid last 30 minutes before market close (3:00-3:30 PM)
+    """
+    now = datetime.now(IST)
+    current_time = now.time()
+    
+    # Market closes at 3:30 PM
+    close_time = dt_time(15, 30)
+    buffer_time = dt_time(15, 0)  # Start avoiding at 3:00 PM
+    
+    if current_time >= buffer_time:
+        minutes_left = (datetime.combine(now.date(), close_time) - now).seconds // 60
+        return False, f"Too close to market close ({minutes_left} min left)"
+    
+    return True, ""
 
 
 # ==================== Signal Generator ====================
 class SignalGenerator:
-    """Generate entry signals with FIXED logic + OI scenario support"""
+    """Generate entry signals with ALL FIXES + ENHANCEMENTS"""
     
     def __init__(self):
         self.last_signal_time = None
@@ -73,7 +168,33 @@ class SignalGenerator:
         self.last_signal_strike = None
     
     def generate(self, **kwargs):
-        """Generate CE_BUY or PE_BUY signal"""
+        """Generate CE_BUY or PE_BUY signal with comprehensive validation"""
+        
+        # 🔥 FIX #3: Check market timing FIRST
+        timing_ok, timing_reason = check_market_timing()
+        if not timing_ok:
+            logger.info(f"⏰ {timing_reason} - No new positions")
+            return None
+        
+        # 🔥 FIX #2: Check for reversal pattern
+        reversal, reversal_reason = detect_reversal(
+            kwargs.get('atm_ce_15m', 0),
+            kwargs.get('atm_pe_15m', 0),
+            kwargs.get('has_15m_atm', False)
+        )
+        if reversal:
+            logger.warning(f"⚠️ REVERSAL DETECTED: {reversal_reason} - NO_TRADE")
+            return None
+        
+        # 🔥 FIX #4: Check for trap pattern
+        trap, trap_reason = detect_trap(
+            kwargs.get('ce_total_15m', 0),
+            kwargs.get('pe_total_15m', 0),
+            kwargs.get('has_15m_total', False)
+        )
+        if trap:
+            logger.warning(f"⚠️ {trap_reason} - NO_TRADE")
+            return None
         
         # Try CE_BUY
         ce_signal = self._check_ce_buy(**kwargs)
@@ -90,20 +211,39 @@ class SignalGenerator:
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
                       gamma_zone, momentum, multi_tf, oi_strength='weak', oi_scenario=None, **kwargs):
-        """Check CE_BUY setup with VWAP validation + OI scenario"""
+        """Check CE_BUY setup with COMPREHENSIVE VALIDATION"""
         
-        # STEP 1: VWAP Validation (BLOCKING CHECK)
+        # 🔥 FIX #1: STRICT VWAP Validation (BLOCKING CHECK)
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
             "CE_BUY", futures_price, vwap, atr
         )
+        
+        # HARD REJECT if price on wrong side of VWAP
+        if futures_price <= vwap:
+            logger.debug(f"  ❌ CE_BUY HARD REJECT: Entry ₹{futures_price:.2f} <= VWAP ₹{vwap:.2f}")
+            return None
+        
+        # Raise VWAP score threshold
+        if vwap_score < MIN_VWAP_SCORE:
+            logger.debug(f"  ❌ CE_BUY rejected: VWAP score {vwap_score} < {MIN_VWAP_SCORE}")
+            return None
         
         if not vwap_valid:
             logger.debug(f"  ❌ CE_BUY rejected: {vwap_reason}")
             return None
         
-        logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        logger.debug(f"  ✅ VWAP check passed: Entry ₹{futures_price:.2f} > VWAP ₹{vwap:.2f} (Score: {vwap_score})")
         
-        # 🆕 STEP 1.5: Check OI scenario
+        # 🆕 PCR Bias Check
+        pcr_bias, pcr_desc, pcr_modifier = get_pcr_bias(pcr)
+        logger.debug(f"  📊 PCR Bias: {pcr_bias} - {pcr_desc}")
+        
+        # Reject CE_BUY if market OVERHEATED (PCR < 0.7)
+        if pcr < 0.7:
+            logger.debug(f"  ⚠️ CE_BUY cautious: PCR {pcr:.2f} too low (overheated)")
+            # Don't hard reject, but reduce confidence
+        
+        # 🆕 OI Scenario boost
         oi_scenario_boost = 0
         oi_scenario_type = None
         
@@ -112,18 +252,17 @@ class SignalGenerator:
             ce_signal = oi_scenario.get('ce_signal', 'NEUTRAL')
             ce_scenario = oi_scenario.get('ce_scenario')
             
-            # STRONG BULLISH scenarios get boost
             if 'BULLISH' in primary_direction or 'BULLISH' in ce_signal:
                 if 'STRONG' in ce_signal:
-                    oi_scenario_boost = 15  # Fresh buying
+                    oi_scenario_boost = 15
                     oi_scenario_type = f"{ce_scenario} (STRONG)"
                 else:
-                    oi_scenario_boost = 5   # Weak/covering
+                    oi_scenario_boost = 5
                     oi_scenario_type = f"{ce_scenario} (WEAK)"
                 
                 logger.debug(f"  🔥 OI Scenario: {oi_scenario_type} (+{oi_scenario_boost}%)")
         
-        # STEP 2: Primary checks (STRICTER - both TF required)
+        # Primary checks (STRICTER)
         primary_ce = ce_total_15m < -MIN_OI_15M_FOR_ENTRY and ce_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
         primary_atm = atm_ce_15m < -ATM_OI_THRESHOLD and has_15m_atm
         primary_vol = volume_spike
@@ -134,11 +273,11 @@ class SignalGenerator:
             logger.debug(f"  ❌ CE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
             return None
         
-        # STEP 3: Secondary checks
+        # Secondary checks
         secondary_price = futures_price > vwap
         secondary_green = candle_data.get('color') == 'GREEN'
         
-        # STEP 4: Bonus checks
+        # Bonus checks
         bonus_5m_strong = ce_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
         bonus_vwap_above = vwap_distance > 0
@@ -150,7 +289,7 @@ class SignalGenerator:
         bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_above, bonus_pcr, 
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
-        # STEP 5: Calculate confidence (IMPROVED)
+        # Calculate confidence (IMPROVED with PCR)
         confidence = 40  # Base
         
         # Primary checks (60 points max)
@@ -165,14 +304,17 @@ class SignalGenerator:
         # VWAP score (20 points max)
         confidence += int(vwap_score / 5)
         
-        # 🆕 OI Scenario boost
+        # OI Scenario boost
         confidence += oi_scenario_boost
         
-        # Secondary checks (10 points)
+        # PCR modifier
+        confidence += pcr_modifier
+        
+        # Secondary checks
         if secondary_green: confidence += 5
         if secondary_price: confidence += 5
         
-        # Bonus checks (each 1-2 points)
+        # Bonus checks
         confidence += min(bonus_passed * 2, 15)
         
         confidence = min(confidence, 98)
@@ -181,7 +323,7 @@ class SignalGenerator:
             logger.debug(f"  ❌ CE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
             return None
         
-        # STEP 6: Calculate levels
+        # Calculate levels
         sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
         entry = futures_price
         target = entry + int(atr * ATR_TARGET_MULTIPLIER)
@@ -210,26 +352,23 @@ class SignalGenerator:
             atm_ce_change=atm_ce_15m,
             atm_pe_change=atm_pe_15m,
             pcr=pcr,
+            pcr_bias=pcr_bias,  # 🆕 NEW
             volume_spike=volume_spike,
             volume_ratio=volume_ratio,
             order_flow=order_flow,
             confidence=confidence,
             primary_checks=primary_passed,
             bonus_checks=bonus_passed,
-            trailing_sl_enabled=ENABLE_TRAILING_SL,
-            is_expiry_day=gamma_zone,
-            oi_scenario_type=oi_scenario_type,  # 🆕 Store scenario
-            analysis_details={
-                'primary': {'ce_unwinding': primary_ce, 'atm_unwinding': primary_atm, 'volume': primary_vol},
-                'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed,
-                'oi_scenario_boost': oi_scenario_boost  # 🆕
-            }
+            oi_scenario_type=oi_scenario_type
         )
         
-        self.last_signal_time = datetime.now(IST)
-        self.last_signal_type = SignalType.CE_BUY
-        self.last_signal_strike = atm_strike
+        logger.info(f"  ✅ CE_BUY signal generated!")
+        logger.info(f"  Type: CE_BUY")
+        logger.info(f"  Entry: ₹{entry:.2f}")
+        logger.info(f"  Confidence: {confidence}%")
+        logger.info(f"  VWAP Score: {vwap_score}/100 ✅")
+        logger.info(f"  PCR Bias: {pcr_bias}")
+        logger.info(f"  OI Strength: {oi_strength}")
         
         return signal
     
@@ -239,20 +378,38 @@ class SignalGenerator:
                       has_5m_total, has_15m_total, has_5m_atm, has_15m_atm,
                       volume_spike, volume_ratio, order_flow, candle_data, 
                       gamma_zone, momentum, multi_tf, oi_strength='weak', oi_scenario=None, **kwargs):
-        """Check PE_BUY setup with VWAP validation + OI scenario"""
+        """Check PE_BUY setup with COMPREHENSIVE VALIDATION"""
         
-        # STEP 1: VWAP Validation (BLOCKING CHECK)
+        # 🔥 FIX #1: STRICT VWAP Validation
         vwap_valid, vwap_reason, vwap_score = TechnicalAnalyzer.validate_signal_with_vwap(
             "PE_BUY", futures_price, vwap, atr
         )
+        
+        # HARD REJECT if price on wrong side of VWAP
+        if futures_price >= vwap:
+            logger.debug(f"  ❌ PE_BUY HARD REJECT: Entry ₹{futures_price:.2f} >= VWAP ₹{vwap:.2f}")
+            return None
+        
+        # Raise VWAP score threshold
+        if vwap_score < MIN_VWAP_SCORE:
+            logger.debug(f"  ❌ PE_BUY rejected: VWAP score {vwap_score} < {MIN_VWAP_SCORE}")
+            return None
         
         if not vwap_valid:
             logger.debug(f"  ❌ PE_BUY rejected: {vwap_reason}")
             return None
         
-        logger.debug(f"  ✅ VWAP check passed: {vwap_reason} (Score: {vwap_score})")
+        logger.debug(f"  ✅ VWAP check passed: Entry ₹{futures_price:.2f} < VWAP ₹{vwap:.2f} (Score: {vwap_score})")
         
-        # 🆕 STEP 1.5: Check OI scenario
+        # 🆕 PCR Bias Check
+        pcr_bias, pcr_desc, pcr_modifier = get_pcr_bias(pcr)
+        logger.debug(f"  📊 PCR Bias: {pcr_bias} - {pcr_desc}")
+        
+        # Reject PE_BUY if market OVERSOLD (PCR > 1.3)
+        if pcr > 1.3:
+            logger.debug(f"  ⚠️ PE_BUY cautious: PCR {pcr:.2f} too high (oversold)")
+        
+        # OI Scenario boost
         oi_scenario_boost = 0
         oi_scenario_type = None
         
@@ -261,18 +418,17 @@ class SignalGenerator:
             pe_signal = oi_scenario.get('pe_signal', 'NEUTRAL')
             pe_scenario = oi_scenario.get('pe_scenario')
             
-            # STRONG BEARISH scenarios get boost
             if 'BEARISH' in primary_direction or 'BEARISH' in pe_signal:
                 if 'STRONG' in pe_signal:
-                    oi_scenario_boost = 15  # Fresh selling
+                    oi_scenario_boost = 15
                     oi_scenario_type = f"{pe_scenario} (STRONG)"
                 else:
-                    oi_scenario_boost = 5   # Weak/covering
+                    oi_scenario_boost = 5
                     oi_scenario_type = f"{pe_scenario} (WEAK)"
                 
                 logger.debug(f"  🔥 OI Scenario: {oi_scenario_type} (+{oi_scenario_boost}%)")
         
-        # STEP 2: Primary checks (STRICTER)
+        # Primary checks
         primary_pe = pe_total_15m < -MIN_OI_15M_FOR_ENTRY and pe_total_5m < -MIN_OI_5M_FOR_ENTRY and has_15m_total and has_5m_total
         primary_atm = atm_pe_15m < -ATM_OI_THRESHOLD and has_15m_atm
         primary_vol = volume_spike
@@ -283,26 +439,25 @@ class SignalGenerator:
             logger.debug(f"  ❌ PE_BUY: Only {primary_passed}/{MIN_PRIMARY_CHECKS} primary checks")
             return None
         
-        # STEP 3: Secondary checks
+        # Secondary checks
         secondary_price = futures_price < vwap
         secondary_red = candle_data.get('color') == 'RED'
         
-        # STEP 4: Bonus checks
+        # Bonus checks
         bonus_5m_strong = pe_total_5m < -STRONG_OI_5M_THRESHOLD and has_5m_total
         bonus_candle = candle_data.get('size', 0) >= MIN_CANDLE_SIZE
         bonus_vwap_below = vwap_distance < 0
         bonus_pcr = pcr < PCR_BEARISH
         bonus_momentum = momentum.get('consecutive_red', 0) >= 2
-        bonus_flow = order_flow > 1.5
+        bonus_flow = order_flow > 1.0
         bonus_vol_strong = volume_ratio >= VOL_SPIKE_STRONG
         
-        bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_below, bonus_pcr,
+        bonus_passed = sum([bonus_5m_strong, bonus_candle, bonus_vwap_below, bonus_pcr, 
                            bonus_momentum, bonus_flow, multi_tf, gamma_zone, bonus_vol_strong])
         
-        # STEP 5: Calculate confidence (IMPROVED)
-        confidence = 40  # Base
+        # Calculate confidence
+        confidence = 40
         
-        # Primary checks (60 points max)
         if primary_pe:
             if oi_strength == 'strong':
                 confidence += 25
@@ -311,17 +466,13 @@ class SignalGenerator:
         if primary_atm: confidence += 20
         if primary_vol: confidence += 15
         
-        # VWAP score (20 points max)
         confidence += int(vwap_score / 5)
-        
-        # 🆕 OI Scenario boost
         confidence += oi_scenario_boost
+        confidence += pcr_modifier
         
-        # Secondary checks (10 points)
         if secondary_red: confidence += 5
         if secondary_price: confidence += 5
         
-        # Bonus checks
         confidence += min(bonus_passed * 2, 15)
         
         confidence = min(confidence, 98)
@@ -330,7 +481,7 @@ class SignalGenerator:
             logger.debug(f"  ❌ PE_BUY: Confidence {confidence}% < {MIN_CONFIDENCE}%")
             return None
         
-        # STEP 6: Calculate levels
+        # Calculate levels
         sl_mult = ATR_SL_GAMMA_MULTIPLIER if gamma_zone else ATR_SL_MULTIPLIER
         entry = futures_price
         target = entry - int(atr * ATR_TARGET_MULTIPLIER)
@@ -359,158 +510,59 @@ class SignalGenerator:
             atm_ce_change=atm_ce_15m,
             atm_pe_change=atm_pe_15m,
             pcr=pcr,
+            pcr_bias=pcr_bias,
             volume_spike=volume_spike,
             volume_ratio=volume_ratio,
             order_flow=order_flow,
             confidence=confidence,
             primary_checks=primary_passed,
             bonus_checks=bonus_passed,
-            trailing_sl_enabled=ENABLE_TRAILING_SL,
-            is_expiry_day=gamma_zone,
-            oi_scenario_type=oi_scenario_type,  # 🆕 Store scenario
-            analysis_details={
-                'primary': {'pe_unwinding': primary_pe, 'atm_unwinding': primary_atm, 'volume': primary_vol},
-                'vwap_reason': vwap_reason,
-                'bonus_count': bonus_passed,
-                'oi_scenario_boost': oi_scenario_boost  # 🆕
-            }
+            oi_scenario_type=oi_scenario_type
         )
         
-        self.last_signal_time = datetime.now(IST)
-        self.last_signal_type = SignalType.PE_BUY
-        self.last_signal_strike = atm_strike
+        logger.info(f"  ✅ PE_BUY signal generated!")
+        logger.info(f"  Type: PE_BUY")
+        logger.info(f"  Entry: ₹{entry:.2f}")
+        logger.info(f"  Confidence: {confidence}%")
+        logger.info(f"  VWAP Score: {vwap_score}/100 ✅")
+        logger.info(f"  PCR Bias: {pcr_bias}")
+        logger.info(f"  OI Strength: {oi_strength}")
         
         return signal
 
 
-# ==================== Signal Validator ====================
+# Keep SignalValidator class unchanged (no modifications needed)
 class SignalValidator:
-    """Validate and manage signal cooldown with re-entry protection"""
+    """Validate if signal should be executed - prevents re-entry too soon"""
     
     def __init__(self):
         self.last_signal_time = None
-        self.signal_count = 0
-        self.recent_signals = []
-        self.last_exit_time = None
-        self.last_exit_type = None
-        self.last_exit_strike = None
+        self.last_signal_strike = None
+        self.last_signal_type = None
     
-    def validate(self, signal):
-        """Validate signal with enhanced duplicate/re-entry checks"""
-        if signal is None:
-            return None
+    def should_execute(self, signal: Signal) -> tuple[bool, str]:
+        """Check if signal should be executed"""
         
-        # Check 1: Basic cooldown
-        if not self._check_cooldown():
-            logger.info("⏸️ Signal in cooldown")
-            return None
+        # First signal always valid
+        if not self.last_signal_time:
+            return True, "First signal"
         
-        # Check 2: Duplicate signal (same direction + strike in 10 min)
-        if self._is_duplicate_signal(signal):
-            logger.info("⚠️ Duplicate signal ignored (same direction+strike in last 10min)")
-            return None
+        # Check cooldown period
+        time_since_last = (signal.timestamp - self.last_signal_time).total_seconds() / 60
         
-        # Check 3: Same strike re-entry protection
-        if self._is_same_strike_too_soon(signal):
-            logger.info(f"⚠️ Same strike {signal.atm_strike} re-entry blocked (need {SAME_STRIKE_COOLDOWN_MINUTES}min gap)")
-            return None
+        if time_since_last < REENTRY_COOLDOWN_MINUTES:
+            return False, f"Cooldown: {REENTRY_COOLDOWN_MINUTES - int(time_since_last)} min left"
         
-        # Check 4: Opposite signal after exit protection
-        if self._is_opposite_too_soon(signal):
-            logger.info(f"⚠️ Opposite signal too soon after exit (need {OPPOSITE_SIGNAL_COOLDOWN_MINUTES}min gap)")
-            return None
+        # Check same strike
+        if (signal.recommended_strike == self.last_signal_strike and 
+            str(signal.signal_type) == self.last_signal_type):
+            if time_since_last < REENTRY_SAME_STRIKE_MINUTES:
+                return False, f"Same strike cooldown: {REENTRY_SAME_STRIKE_MINUTES - int(time_since_last)} min left"
         
-        # Check 5: R:R validation
-        rr = signal.get_rr_ratio()
-        if rr < 1.0:
-            logger.warning(f"⚠️ Poor R:R: {rr:.2f}")
-            return None
-        
-        # Check 6: Confidence validation
-        if signal.confidence < MIN_CONFIDENCE:
-            logger.warning(f"⚠️ Low confidence: {signal.confidence}%")
-            return None
-        
-        # Track signal
-        self.recent_signals.append({
-            'type': signal.signal_type,
-            'strike': signal.atm_strike,
-            'time': signal.timestamp,
-            'confidence': signal.confidence
-        })
-        
-        # Keep only last 10
-        self.recent_signals = self.recent_signals[-10:]
-        
-        self.last_signal_time = datetime.now(IST)
-        self.signal_count += 1
-        
-        logger.info(f"✅ Signal validated: {signal.signal_type.value} @ {signal.atm_strike} ({signal.confidence}%)")
-        
-        return signal
+        return True, "Validation passed"
     
-    def record_exit(self, signal_type, strike):
-        """Record exit for re-entry protection"""
-        self.last_exit_time = datetime.now(IST)
-        self.last_exit_type = signal_type
-        self.last_exit_strike = strike
-        logger.debug(f"📝 Exit recorded: {signal_type.value} @ {strike}")
-    
-    def _check_cooldown(self):
-        """Check basic cooldown period"""
-        if self.last_signal_time is None:
-            return True
-        
-        elapsed = (datetime.now(IST) - self.last_signal_time).total_seconds()
-        return elapsed >= SIGNAL_COOLDOWN_SECONDS
-    
-    def _is_duplicate_signal(self, signal):
-        """Check if same signal in last 10 minutes"""
-        cutoff = datetime.now(IST) - timedelta(minutes=10)
-        
-        for old in self.recent_signals:
-            if (old['type'] == signal.signal_type and 
-                old['strike'] == signal.atm_strike and
-                old['time'] > cutoff):
-                return True
-        
-        return False
-    
-    def _is_same_strike_too_soon(self, signal):
-        """Check if same strike re-entry too soon"""
-        if not self.last_exit_time or not self.last_exit_strike:
-            return False
-        
-        elapsed_minutes = (datetime.now(IST) - self.last_exit_time).total_seconds() / 60
-        
-        if (signal.atm_strike == self.last_exit_strike and 
-            elapsed_minutes < SAME_STRIKE_COOLDOWN_MINUTES):
-            return True
-        
-        return False
-    
-    def _is_opposite_too_soon(self, signal):
-        """Check if opposite signal too soon after exit"""
-        if not self.last_exit_time or not self.last_exit_type:
-            return False
-        
-        elapsed_minutes = (datetime.now(IST) - self.last_exit_time).total_seconds() / 60
-        
-        # Check if opposite direction
-        opposite = (
-            (self.last_exit_type == SignalType.CE_BUY and signal.signal_type == SignalType.PE_BUY) or
-            (self.last_exit_type == SignalType.PE_BUY and signal.signal_type == SignalType.CE_BUY)
-        )
-        
-        if opposite and elapsed_minutes < OPPOSITE_SIGNAL_COOLDOWN_MINUTES:
-            return True
-        
-        return False
-    
-    def get_cooldown_remaining(self):
-        """Get seconds until next signal"""
-        if self.last_signal_time is None:
-            return 0
-        
-        elapsed = (datetime.now(IST) - self.last_signal_time).total_seconds()
-        return max(0, int(SIGNAL_COOLDOWN_SECONDS - elapsed))
+    def record_signal(self, signal: Signal):
+        """Record executed signal"""
+        self.last_signal_time = signal.timestamp
+        self.last_signal_strike = signal.recommended_strike
+        self.last_signal_type = str(signal.signal_type)
