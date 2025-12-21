@@ -1,218 +1,194 @@
 """
-Configuration & Settings v7.0 - COMPREHENSIVE FIX
+NIFTY 50 Trading Bot - Configuration
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🆕 ADDED:
-- 30m OI comparison thresholds
-- OI Velocity pattern thresholds
-- OTM strike analysis settings
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Based on: Price + OI + PCR Combined Strategy
+Author: Yellow Flash
+Date: December 2024
 """
-import os
-from datetime import datetime, timedelta, time
 
-# ==================== API CONFIGURATION ====================
-API_VERSION = 'v2'
-UPSTOX_BASE_URL = 'https://api.upstox.com'
-UPSTOX_QUOTE_URL = f'{UPSTOX_BASE_URL}/v2/market-quote/quotes'
-UPSTOX_HISTORICAL_URL = f'{UPSTOX_BASE_URL}/v2/historical-candle'
-UPSTOX_OPTION_CHAIN_URL = f'{UPSTOX_BASE_URL}/v2/option/chain'
-UPSTOX_INSTRUMENTS_URL = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz'
+import pytz
+from datetime import time
 
-UPSTOX_ACCESS_TOKEN = os.getenv('UPSTOX_ACCESS_TOKEN', '')
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# API CREDENTIALS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ==================== MEMORY & STORAGE ====================
-REDIS_URL = os.getenv('REDIS_URL', None)
-MEMORY_TTL_HOURS = 24
-MEMORY_TTL_SECONDS = MEMORY_TTL_HOURS * 3600
-SCAN_INTERVAL = 60  # seconds
+# Upstox API
+UPSTOX_API_KEY = "your_api_key_here"
+UPSTOX_API_SECRET = "your_secret_here"
+UPSTOX_REDIRECT_URI = "https://your-redirect-uri.com"
+UPSTOX_ACCESS_TOKEN = None  # Will be set after OAuth
 
-# 🔧 MODIFIED: Warmup reduced to 15 minutes (was 35 for 30m)
-OI_MEMORY_SCANS = 20  # 20 scans = 20 minutes (15m warmup + 5m buffer)
-OI_MEMORY_BUFFER = 5  # Extra buffer for tolerance
+# Telegram
+TELEGRAM_BOT_TOKEN = "your_telegram_bot_token"
+TELEGRAM_CHAT_ID = "your_chat_id"
 
-# ==================== MARKET TIMINGS ====================
-PREMARKET_START = time(9, 10)
-PREMARKET_END = time(9, 15)
-FIRST_DATA_TIME = time(9, 16)
-SIGNAL_START = time(9, 21)     # 🔥 EARLY SIGNALS from 9:21 AM
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# TRADING SETTINGS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Instrument
+SYMBOL = "NIFTY"
+INDEX_SYMBOL = "NSE_INDEX|Nifty 50"
+FUTURES_SYMBOL = "NSE_FO|NIFTY24DECFUT"  # Update monthly!
+
+# Expiry
+NIFTY_EXPIRY_DAY = "Tuesday"  # NIFTY weekly expiry
+
+# Timezone
+IST = pytz.timezone('Asia/Kolkata')
+
+# Trading Hours
+MARKET_OPEN = time(9, 15)
+TRADING_START = time(9, 20)  # Start 5 min after open
+TRADING_END = time(15, 20)    # Stop 10 min before close
 MARKET_CLOSE = time(15, 30)
-WARMUP_MINUTES = 15             # 🔧 REDUCED: Was 30, now 15
-EARLY_SIGNAL_CONFIDENCE = 85    # 🔥 HIGH threshold for early signals (before full warmup)
 
-# ==================== STRIKE CONFIGURATION ====================
-STRIKE_GAP = 50
-STRIKES_TO_FETCH = 5           # ATM ± 5 = 11 total strikes
-STRIKES_FOR_ANALYSIS = 2       # ATM ± 2 = 5 strikes for deep analysis
+# Scan Interval
+SCAN_INTERVAL_SECONDS = 60  # Every 60 seconds
 
-# 🆕 OTM STRIKE ANALYSIS (from Image 3)
-OTM_RESISTANCE_OFFSET = 100    # Check ATM + 100 for resistance
-OTM_SUPPORT_OFFSET = 100       # Check ATM - 100 for support
-OTM_HIGH_OI_THRESHOLD = 1000000  # OI above this = significant level
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STRATEGY PARAMETERS (From PDF Guide)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ==================== OI THRESHOLDS ====================
-# Multi-timeframe OI thresholds
-OI_5M_THRESHOLD = 2.0
-OI_15M_THRESHOLD = 2.5
-OI_30M_THRESHOLD = 3.0  # 🆕 NEW: 30m should be stronger
+# PCR Thresholds
+PCR_STRONG_SUPPORT = 2.5      # PCR > 2.5 = Strong support
+PCR_SUPPORT = 1.5             # PCR 1.5-2.5 = Support
+PCR_NEUTRAL_HIGH = 1.0        # PCR 1.0-1.5 = Neutral bullish
+PCR_NEUTRAL_LOW = 0.7         # PCR 0.7-1.0 = Neutral bearish
+PCR_RESISTANCE = 0.5          # PCR 0.5-0.7 = Resistance
+PCR_STRONG_RESISTANCE = 0.5   # PCR < 0.5 = Strong resistance
 
-# Signal generation requirements
-MIN_OI_5M_FOR_ENTRY = 2.0
-MIN_OI_15M_FOR_ENTRY = 2.5
-MIN_OI_30M_FOR_ENTRY = 3.0  # 🆕 NEW
+# OI Change Thresholds (percentage)
+OI_SIGNIFICANT_CHANGE = 5.0   # 5% change = significant
+OI_STRONG_CHANGE = 10.0       # 10% change = strong signal
 
-STRONG_OI_5M_THRESHOLD = 3.5
-STRONG_OI_15M_THRESHOLD = 5.0
-STRONG_OI_30M_THRESHOLD = 6.0  # 🆕 NEW
+# Price Change Thresholds (points)
+PRICE_SIGNIFICANT_MOVE = 20   # 20 points = significant
+PRICE_STRONG_MOVE = 50        # 50 points = strong move
 
-# ATM-specific
-ATM_OI_THRESHOLD = 3.0
-OI_THRESHOLD_STRONG = 5.0
-OI_THRESHOLD_MEDIUM = 2.5
+# Signal Confidence
+MIN_CONFIDENCE = 70           # Minimum confidence to trade
+HIGH_CONFIDENCE = 85          # High confidence threshold
 
-# 🆕 OI VELOCITY PATTERNS (from Image 1)
-# Acceleration: 15m > 30m (speed increasing)
-VELOCITY_ACCELERATION_MIN = 5.0
-VELOCITY_ACCELERATION_STRONG = 8.0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RISK MANAGEMENT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Deceleration: 15m < 30m (speed decreasing)
-VELOCITY_DECELERATION_MIN = 5.0
+# Position Sizing
+CAPITAL_PER_TRADE = 10000     # ₹10,000 per trade
+MAX_TRADES_PER_DAY = 3        # Maximum 3 trades per day
 
-# Monster Loading: Both 15m & 30m very high
-VELOCITY_MONSTER_15M = 8.0
-VELOCITY_MONSTER_30M = 8.0
+# Stop Loss & Target
+STOP_LOSS_PERCENT = 30        # 30% SL (as per your strategy)
+TARGET_MULTIPLIER = 2.0       # 2x target (60% profit)
 
-# Exhaustion: 30m high but 15m low (slowing)
-VELOCITY_EXHAUSTION_30M = 6.0
-VELOCITY_EXHAUSTION_15M = 2.0
+# Position Management
+MAX_HOLDING_TIME_MINUTES = 120  # 2 hours max hold
+TRAIL_SL_AFTER_PROFIT = 20      # Trail SL after 20% profit
 
-# ==================== VOLUME THRESHOLDS ====================
-VOL_SPIKE_MULTIPLIER = 2.0
-VOL_SPIKE_STRONG = 3.0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DATA COLLECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ==================== PCR THRESHOLDS ====================
-PCR_BULLISH = 1.2
-PCR_BEARISH = 0.8
+# Option Chain
+STRIKES_RANGE = 500           # Fetch ±500 points from ATM
+STRIKES_INTERVAL = 50         # NIFTY strike interval
 
-# 🆕 PCR BIAS BANDS (from Image 1)
-PCR_OVERHEATED = 0.7   # Too bullish
-PCR_BALANCED_BULL = 0.9
-PCR_NEUTRAL_LOW = 0.9
-PCR_NEUTRAL_HIGH = 1.1
-PCR_BALANCED_BEAR = 1.3
-PCR_OVERSOLD = 1.3     # Too bearish
+# Historical Data
+HISTORY_RETENTION_MINUTES = 60  # Keep 60 min history
+MIN_HISTORY_FOR_SIGNAL = 3      # Need 3 data points minimum
 
-# ==================== TECHNICAL INDICATORS ====================
-ATR_PERIOD = 14
-ATR_TARGET_MULTIPLIER = 2.5
-ATR_SL_MULTIPLIER = 1.5
-ATR_SL_GAMMA_MULTIPLIER = 2.0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FILTERING (From your requirements)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# VWAP Settings
-VWAP_BUFFER = 10
-VWAP_DISTANCE_MAX_ATR_MULTIPLE = 3.0
-VWAP_STRICT_MODE = True
+# Volume Filter
+MIN_VOLUME_RATIO = 1.0        # Normal volume required
 
-# 🆕 VWAP SCORE (raised threshold)
-MIN_VWAP_SCORE = 70  # Was 50 - Now stricter
+# VWAP Filter
+VWAP_FILTER_ENABLED = True
+VWAP_DEVIATION_MAX = 0.5      # 0.5% max deviation
 
-# Candle Settings
-MIN_CANDLE_SIZE = 5
+# Time-based Filters
+AVOID_FIRST_15_MIN = True     # Skip 9:15-9:30
+AVOID_LAST_15_MIN = True      # Skip 15:15-15:30
+CAUTIOUS_EXPIRY_DAY = True    # Be careful on Tuesday
 
-# ==================== EXIT LOGIC ====================
-EXIT_OI_REVERSAL_THRESHOLD = 3.0
-EXIT_OI_CONFIRMATION_CANDLES = 2
-EXIT_OI_SPIKE_THRESHOLD = 8.0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LOGGING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-EXIT_VOLUME_DRY_THRESHOLD = 0.5
-EXIT_PREMIUM_DROP_PERCENT = 15
-EXIT_CANDLE_REJECTION_MULTIPLIER = 2
+LOG_LEVEL = "INFO"            # DEBUG, INFO, WARNING, ERROR
+LOG_TO_FILE = True
+LOG_FILE_PATH = "bot_logs.log"
 
-MIN_HOLD_TIME_MINUTES = 10
-MIN_HOLD_BEFORE_OI_EXIT = 8
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ALERTS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ==================== RE-ENTRY PROTECTION ====================
-SAME_STRIKE_COOLDOWN_MINUTES = 10
-OPPOSITE_SIGNAL_COOLDOWN_MINUTES = 5
-SAME_DIRECTION_COOLDOWN_MINUTES = 3
+SEND_TELEGRAM_ALERTS = True
+SEND_STARTUP_MESSAGE = True
+SEND_DAILY_SUMMARY = True
 
-# ==================== RISK MANAGEMENT ====================
-USE_PREMIUM_SL = True
-PREMIUM_SL_PERCENT = 30
+# Alert Types
+ALERT_ON_SIGNAL = True
+ALERT_ON_ENTRY = True
+ALERT_ON_EXIT = True
+ALERT_ON_SL_HIT = True
+ALERT_ON_TARGET_HIT = True
 
-ENABLE_TRAILING_SL = True
-TRAILING_SL_TRIGGER = 0.6
-TRAILING_SL_DISTANCE = 0.4
-TRAILING_SL_UPDATE_THRESHOLD = 5
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ADVANCED
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SIGNAL_COOLDOWN_SECONDS = 180
-MIN_PRIMARY_CHECKS = 2
-MIN_CONFIDENCE = 70
+# Retry Settings
+API_RETRY_ATTEMPTS = 3
+API_RETRY_DELAY = 2           # seconds
 
-# ==================== TELEGRAM ====================
-TELEGRAM_ENABLED = os.getenv('TELEGRAM_ENABLED', 'false').lower() == 'true'
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+# Rate Limiting
+API_RATE_LIMIT_DELAY = 0.5    # 0.5s between calls
 
-# ==================== LOGGING ====================
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+# Debug Mode
+DEBUG_MODE = False            # Set True for testing
+PAPER_TRADING = True          # Set False for live trading
 
-# ==================== NIFTY CONFIG ====================
-NIFTY_SPOT_KEY = None
-NIFTY_INDEX_KEY = None
-NIFTY_FUTURES_KEY = None
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# VERSION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-LOT_SIZE = 50
-ATR_FALLBACK = 30
+BOT_VERSION = "1.0-NIFTY-OI-PCR"
+BOT_NAME = "NIFTY OI+PCR Bot"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# VALIDATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ==================== HELPER FUNCTIONS ====================
+def validate_config():
+    """Validate configuration settings"""
+    errors = []
+    
+    # Check API credentials
+    if not UPSTOX_API_KEY or UPSTOX_API_KEY == "your_api_key_here":
+        errors.append("UPSTOX_API_KEY not set!")
+    
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "your_telegram_bot_token":
+        errors.append("TELEGRAM_BOT_TOKEN not set!")
+    
+    # Check parameters
+    if MIN_CONFIDENCE > 100 or MIN_CONFIDENCE < 0:
+        errors.append("MIN_CONFIDENCE must be 0-100")
+    
+    if STOP_LOSS_PERCENT > 50:
+        errors.append("STOP_LOSS_PERCENT too high!")
+    
+    return errors
 
-def get_next_weekly_expiry():
-    """Get next Tuesday (weekly options expiry)"""
-    today = datetime.now()
-    days_ahead = 1 - today.weekday()
-    if days_ahead <= 0:
-        days_ahead += 7
-    next_tuesday = today + timedelta(days=days_ahead)
-    return next_tuesday.strftime('%Y-%m-%d')
-
-
-def get_futures_contract_name():
-    """Generate display name for futures contract"""
-    return "NIFTY_FUTURES_AUTO"
-
-
-def calculate_atm_strike(spot_price):
-    """Calculate ATM strike (rounded to nearest 50)"""
-    return round(spot_price / STRIKE_GAP) * STRIKE_GAP
-
-
-def get_strike_range_fetch(atm_strike):
-    """Get strike range for FETCHING (11 strikes total)"""
-    min_strike = atm_strike - (STRIKES_TO_FETCH * STRIKE_GAP)
-    max_strike = atm_strike + (STRIKES_TO_FETCH * STRIKE_GAP)
-    return min_strike, max_strike
-
-
-def get_deep_analysis_strikes(atm_strike):
-    """Get strikes for DEEP ANALYSIS (5 strikes only)"""
-    strikes = []
-    for i in range(-STRIKES_FOR_ANALYSIS, STRIKES_FOR_ANALYSIS + 1):
-        strikes.append(atm_strike + (i * STRIKE_GAP))
-    return strikes
-
-
-def get_otm_strikes(atm_strike):
-    """
-    🆕 Get OTM strikes for support/resistance analysis
-    Returns: (otm_above, otm_below)
-    """
-    otm_above = atm_strike + OTM_RESISTANCE_OFFSET  # ATM + 100 (resistance)
-    otm_below = atm_strike - OTM_SUPPORT_OFFSET     # ATM - 100 (support)
-    return otm_above, otm_below
-
-
-def is_deep_analysis_strike(strike, atm_strike):
-    """Check if strike is in deep analysis range"""
-    diff = abs(strike - atm_strike)
-    return diff <= (STRIKES_FOR_ANALYSIS * STRIKE_GAP)
+if __name__ == "__main__":
+    errors = validate_config()
+    if errors:
+        print("❌ Configuration Errors:")
+        for error in errors:
+            print(f"  - {error}")
+    else:
+        print("✅ Configuration valid!")
