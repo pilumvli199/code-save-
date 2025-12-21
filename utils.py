@@ -1,32 +1,37 @@
 """
-Utilities: Time, Logging, Validators
+Utility Functions
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Helper functions for bot
 """
-import pytz
-from datetime import datetime, time
+
 import logging
-import colorlog
+from datetime import datetime, timedelta
+from config import *
 
-# Timezone
-IST = pytz.timezone('Asia/Kolkata')
-
-def setup_logger(name):
-    """Setup colored logger"""
-    handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter(
-        '%(log_color)s%(asctime)s - %(levelname)-8s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bg_white'
-        }
-    ))
+def setup_logger():
+    """Setup logging configuration"""
+    logger = logging.getLogger("NiftyBot")
+    logger.setLevel(getattr(logging, LOG_LEVEL))
     
-    logger = colorlog.getLogger(name)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(console_format)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    if LOG_TO_FILE:
+        file_handler = logging.FileHandler(LOG_FILE_PATH)
+        file_handler.setLevel(logging.DEBUG)
+        file_format = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        file_handler.setFormatter(file_format)
+        logger.addHandler(file_handler)
     
     return logger
 
@@ -34,120 +39,93 @@ def get_ist_time():
     """Get current IST time"""
     return datetime.now(IST)
 
-def format_time_ist(dt):
-    """Format datetime as IST string"""
-    return dt.strftime('%I:%M:%S %p IST')
-
-def is_premarket():
-    """Check if premarket time (9:10-9:15 AM)"""
-    from config import PREMARKET_START, PREMARKET_END
-    now = get_ist_time().time()
-    return PREMARKET_START <= now < PREMARKET_END
-
-def is_first_data_time():
-    """Check if it's time for first data collection (9:16 AM)"""
-    from config import FIRST_DATA_TIME
-    now = get_ist_time().time()
-    return now >= FIRST_DATA_TIME and now < time(9, 17)
-
-def is_signal_time(warmup_complete=False):
-    """Check if signal generation time WITH warmup validation"""
-    from config import SIGNAL_START
-    now = get_ist_time().time()
-    cutoff = time(15, 15)
-    
-    # Time window check
-    if not (SIGNAL_START <= now < cutoff):
-        return False, "Outside signal window (9:21-3:15 PM)"
-    
-    # Warmup check
-    if not warmup_complete:
-        return False, "Warmup in progress"
-    
-    return True, "Ready for signals"
-
 def is_market_open():
-    """Check if market is open (9:15 AM - 3:30 PM)"""
-    now = get_ist_time().time()
-    return time(9, 15) <= now < time(15, 30)
+    """Check if market is currently open"""
+    now = get_ist_time()
+    
+    # Check weekday (Monday=0, Sunday=6)
+    if now.weekday() >= 5:  # Saturday or Sunday
+        return False
+    
+    current_time = now.time()
+    return MARKET_OPEN <= current_time <= MARKET_CLOSE
 
-def is_market_closed():
-    """Check if market is closed"""
-    now = get_ist_time().time()
-    return now >= time(15, 30) or now < time(9, 10)
+def is_trading_hours():
+    """Check if within trading hours"""
+    now = get_ist_time()
+    
+    if not is_market_open():
+        return False
+    
+    current_time = now.time()
+    return TRADING_START <= current_time <= TRADING_END
+
+def get_nearest_expiry():
+    """Get nearest NIFTY expiry (Tuesday)"""
+    today = get_ist_time().date()
+    days_ahead = 1 - today.weekday()  # Tuesday = 1
+    
+    if days_ahead <= 0:  # If today is Tuesday or later
+        days_ahead += 7  # Next Tuesday
+    
+    expiry_date = today + timedelta(days=days_ahead)
+    return expiry_date
+
+def round_to_strike(price, interval=50):
+    """Round price to nearest strike"""
+    return round(price / interval) * interval
+
+def calculate_percentage_change(old_value, new_value):
+    """Calculate percentage change"""
+    if old_value == 0:
+        return 0
+    return ((new_value - old_value) / old_value) * 100
+
+def format_number(num):
+    """Format large numbers (Indian style)"""
+    if num >= 10000000:  # 1 Crore
+        return f"{num/10000000:.2f}Cr"
+    elif num >= 100000:  # 1 Lakh
+        return f"{num/100000:.2f}L"
+    elif num >= 1000:
+        return f"{num/1000:.2f}K"
+    else:
+        return f"{num:.2f}"
 
 def get_market_status():
     """Get current market status"""
-    now = get_ist_time()
-    current_time = now.time()
-    
-    if current_time < time(9, 10):
-        return "CLOSED", "Market opens at 9:10 AM"
-    elif current_time < time(9, 15):
-        return "PREMARKET", "Warmup period"
-    elif current_time < time(9, 16):
-        return "MARKET_OPEN", "Waiting for 9:16 first snapshot"
-    elif current_time < time(9, 21):
-        return "WARMUP", "Collecting baseline data"
-    elif current_time < time(15, 30):
-        return "OPEN", "Market active"
+    if not is_market_open():
+        return "CLOSED"
+    elif not is_trading_hours():
+        return "OPEN (Non-trading hours)"
     else:
-        return "CLOSED", "Market closed"
+        return "TRADING"
 
-def validate_price(price):
-    """Validate spot/futures price"""
-    if not price:
-        return False
-    if price <= 0 or price > 100000:
-        return False
-    return True
+def is_expiry_day():
+    """Check if today is expiry day"""
+    today = get_ist_time().weekday()
+    return today == 1  # Tuesday = 1
 
-def validate_strike_data(strike_data, min_strikes=7):
-    """
-    Validate option chain data - need at least 7 strikes for safety
-    """
-    if not strike_data or not isinstance(strike_data, dict):
-        return False
+def time_until_close():
+    """Get minutes until market close"""
+    now = get_ist_time()
+    close_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
     
-    if len(strike_data) < min_strikes:
-        return False
+    if now > close_time:
+        return 0
     
-    # Check structure
-    for strike, data in strike_data.items():
-        # Accept int or float strikes
-        if not isinstance(strike, (int, float)):
-            return False
-        
-        if not isinstance(data, dict):
-            return False
-        
-        # Check required fields
-        required = ['ce_oi', 'pe_oi', 'ce_vol', 'pe_vol']
-        if not all(f in data for f in required):
-            return False
-        
-        # Check if values are numeric
-        for field in required:
-            if not isinstance(data[field], (int, float)):
-                return False
-    
-    # Check if at least some OI exists
-    total_oi = sum(d['ce_oi'] + d['pe_oi'] for d in strike_data.values())
-    if total_oi == 0:
-        return False
-    
-    return True
+    diff = close_time - now
+    return int(diff.total_seconds() / 60)
 
-def validate_candle_data(df, min_candles=10):
-    """Validate futures candle data"""
-    if df is None or df.empty:
-        return False
-    
-    if len(df) < min_candles:
-        return False
-    
-    required = ['close', 'high', 'low', 'volume']
-    if not all(col in df.columns for col in required):
-        return False
-    
-    return True
+# Signal type enum
+class SignalType:
+    CE_BUY = "CE_BUY"
+    PE_BUY = "PE_BUY"
+    NO_TRADE = "NO_TRADE"
+
+# Market status
+class MarketStatus:
+    CLOSED = "CLOSED"
+    PRE_OPEN = "PRE_OPEN"
+    OPEN = "OPEN"
+    CLOSING = "CLOSING"
