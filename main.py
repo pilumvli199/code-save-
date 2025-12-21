@@ -61,7 +61,8 @@ class NiftyTradingBot:
         # Test Telegram
         if SEND_TELEGRAM_ALERTS:
             try:
-                await self.telegram.send_startup_message()
+                futures_sym = self.data_manager.futures_symbol if hasattr(self.data_manager, 'futures_symbol') else None
+                await self.telegram.send_startup_message(futures_sym)
                 logger.info("✅ Telegram connection OK")
             except Exception as e:
                 logger.error(f"❌ Telegram test failed: {e}")
