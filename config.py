@@ -10,18 +10,20 @@ import pytz
 from datetime import time
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# API CREDENTIALS
+# API CREDENTIALS (From Environment Variables)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+import os
+
 # Upstox API
-UPSTOX_API_KEY = "your_api_key_here"
-UPSTOX_API_SECRET = "your_secret_here"
-UPSTOX_REDIRECT_URI = "https://your-redirect-uri.com"
-UPSTOX_ACCESS_TOKEN = None  # Will be set after OAuth
+UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY")
+UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET")
+UPSTOX_REDIRECT_URI = os.getenv("UPSTOX_REDIRECT_URI")
+UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN")
 
 # Telegram
-TELEGRAM_BOT_TOKEN = "your_telegram_bot_token"
-TELEGRAM_CHAT_ID = "your_chat_id"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TRADING SETTINGS
@@ -30,7 +32,9 @@ TELEGRAM_CHAT_ID = "your_chat_id"
 # Instrument
 SYMBOL = "NIFTY"
 INDEX_SYMBOL = "NSE_INDEX|Nifty 50"
-FUTURES_SYMBOL = "NSE_FO|NIFTY24DECFUT"  # Update monthly!
+
+# Futures Symbol - Can be set via ENV or auto-calculated
+FUTURES_SYMBOL = os.getenv("FUTURES_SYMBOL", None)  # If not set, will auto-detect in code
 
 # Expiry
 NIFTY_EXPIRY_DAY = "Tuesday"  # NIFTY weekly expiry
@@ -45,7 +49,7 @@ TRADING_END = time(15, 20)    # Stop 10 min before close
 MARKET_CLOSE = time(15, 30)
 
 # Scan Interval
-SCAN_INTERVAL_SECONDS = 60  # Every 60 seconds
+SCAN_INTERVAL_SECONDS = 300  # Every 5 minutes (300 seconds) for OI analysis
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STRATEGY PARAMETERS (From PDF Guide)
