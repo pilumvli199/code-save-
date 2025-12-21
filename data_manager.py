@@ -21,6 +21,13 @@ class DataManager:
         self.access_token = UPSTOX_ACCESS_TOKEN
         self.base_url = "https://api.upstox.com/v2"
         
+        # Auto-detect futures symbol if not set
+        if FUTURES_SYMBOL:
+            self.futures_symbol = FUTURES_SYMBOL
+        else:
+            self.futures_symbol = get_futures_symbol()
+            logger.info(f"📅 Auto-detected Futures: {self.futures_symbol}")
+        
         # Data storage
         self.oi_history = deque(maxlen=60)  # Keep 60 data points
         self.price_history = deque(maxlen=60)
@@ -52,14 +59,14 @@ class DataManager:
         """Fetch NIFTY futures price"""
         try:
             url = f"{self.base_url}/market-quote/quotes"
-            params = {"symbol": FUTURES_SYMBOL}
+            params = {"symbol": self.futures_symbol}
             headers = {"Authorization": f"Bearer {self.access_token}"}
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
-                        ltp = data['data'][FUTURES_SYMBOL]['last_price']
+                        ltp = data['data'][self.futures_symbol]['last_price']
                         logger.debug(f"Futures price: ₹{ltp:.2f}")
                         return ltp
                     else:
