@@ -1,204 +1,217 @@
 """
-Alerts: Telegram Bot & Message Formatting
-UPDATED: Include VWAP score, OI strength, deep analysis info
+Alerts - Telegram Notifications
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Sends: Trading signals, Status updates
+Format: Clean, readable messages
 """
 
+import aiohttp
+import asyncio
 import logging
+from config import *
+from utils import *
 
-try:
-    from telegram import Bot
-    from telegram.error import TelegramError
-    TELEGRAM_AVAILABLE = True
-except ImportError:
-    TELEGRAM_AVAILABLE = False
+logger = logging.getLogger("NiftyBot.Alerts")
 
-from config import TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-from utils import setup_logger
-
-logger = setup_logger("alerts")
-
-
-# ==================== Telegram Bot ====================
 class TelegramBot:
-    """Telegram notification service"""
+    """Send alerts via Telegram"""
     
     def __init__(self):
-        self.enabled = TELEGRAM_ENABLED
-        self.bot = None
+        self.bot_token = TELEGRAM_BOT_TOKEN
         self.chat_id = TELEGRAM_CHAT_ID
-        
-        if self.enabled:
-            if not TELEGRAM_AVAILABLE:
-                logger.warning("⚠️ python-telegram-bot not installed")
-                self.enabled = False
-            elif not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-                logger.warning("⚠️ Telegram credentials missing")
-                self.enabled = False
-            else:
-                try:
-                    self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
-                    logger.info("✅ Telegram initialized")
-                except Exception as e:
-                    logger.error(f"❌ Telegram init failed: {e}")
-                    self.enabled = False
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
     
-    async def send(self, message, parse_mode='HTML'):
-        """Send message"""
-        if not self.enabled or not self.bot:
+    async def send_message(self, text, parse_mode='HTML'):
+        """Send text message to Telegram"""
+        if not SEND_TELEGRAM_ALERTS:
+            logger.debug("Telegram alerts disabled")
             return False
         
         try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode=parse_mode
-            )
-            return True
-        except TelegramError as e:
-            logger.error(f"❌ Telegram send failed: {e}")
-            return False
+            url = f"{self.base_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': text,
+                'parse_mode': parse_mode,
+                'disable_web_page_preview': True
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        logger.debug("Telegram message sent")
+                        return True
+                    else:
+                        logger.error(f"Telegram send failed: {response.status}")
+                        return False
         except Exception as e:
-            logger.error(f"❌ Unexpected error: {e}")
+            logger.error(f"Error sending Telegram message: {e}")
             return False
     
-    async def send_signal(self, message):
-        """Send entry signal alert"""
-        formatted = f"🔔 <b>TRADING SIGNAL</b>\n\n{message}"
-        return await self.send(formatted)
+    async def send_startup_message(self):
+        """Send bot startup notification"""
+        if not SEND_STARTUP_MESSAGE:
+            return
+        
+        message = f"""
+🚀 <b>NIFTY BOT STARTED</b>
+
+📅 Date: {get_ist_time().strftime('%d %b %Y')}
+⏰ Time: {get_ist_time().strftime('%H:%M:%S IST')}
+🤖 Version: {BOT_VERSION}
+
+📊 Configuration:
+• Symbol: {SYMBOL}
+• Expiry: {get_nearest_expiry().strftime('%d %b')} ({NIFTY_EXPIRY_DAY})
+• Min Confidence: {MIN_CONFIDENCE}%
+• Max Trades: {MAX_TRADES_PER_DAY}
+• Capital/Trade: ₹{CAPITAL_PER_TRADE:,}
+
+🎯 Strategy: OI + PCR + Price Combined
+⚡ Status: ACTIVE & MONITORING
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+<i>Bot is now scanning market...</i>
+"""
+        await self.send_message(message)
     
-    async def send_exit(self, message):
-        """Send exit alert"""
-        formatted = f"🚪 <b>EXIT SIGNAL</b>\n\n{message}"
-        return await self.send(formatted)
+    async def send_signal_alert(self, signal):
+        """Send trading signal alert"""
+        if not ALERT_ON_SIGNAL:
+            return
+        
+        # Icon based on signal type
+        if signal.signal_type == SignalType.CE_BUY:
+            icon = "🟢"
+            signal_name = "CALL BUY (CE)"
+        elif signal.signal_type == SignalType.PE_BUY:
+            icon = "🔴"
+            signal_name = "PUT BUY (PE)"
+        else:
+            return  # Don't send NO_TRADE alerts
+        
+        # Format analysis data
+        analysis = signal.analysis
+        
+        message = f"""
+{icon} <b>TRADING SIGNAL - {signal_name}</b>
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📊 <b>SIGNAL DETAILS:</b>
+• Confidence: <b>{signal.confidence}%</b>
+• Strike: <b>{signal.entry_strike}</b>
+• Entry: ₹{signal.entry_price:.2f}
+• Target: ₹{signal.target_price:.2f} ({TARGET_MULTIPLIER}x)
+• Stop Loss: ₹{signal.stop_loss:.2f} (-{STOP_LOSS_PERCENT}%)
+
+📈 <b>MARKET DATA:</b>
+• Nifty: ₹{analysis['price']:.2f}
+• Price Change: {analysis['price_change']:+.1f} pts
+• PCR: {analysis['pcr']['pcr']:.3f} ({analysis['pcr']['zone']})
+
+📊 <b>OI ANALYSIS:</b>
+• CE OI: {analysis['oi']['ce_change']:+.1f}%
+• PE OI: {analysis['oi']['pe_change']:+.1f}%
+• Total CE: {format_number(analysis['total_ce_oi'])}
+• Total PE: {format_number(analysis['total_pe_oi'])}
+
+💡 <b>REASON:</b>
+"""
+        
+        # Add reasons
+        for reason in signal.reason:
+            message += f"• {reason}\n"
+        
+        message += f"""
+⏰ <b>Time:</b> {signal.timestamp.strftime('%H:%M:%S IST')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ <b>Risk:</b> Max loss ₹{signal.entry_price * STOP_LOSS_PERCENT/100:.2f}
+🎯 <b>R:R Ratio:</b> 1:{TARGET_MULTIPLIER * 100 / STOP_LOSS_PERCENT:.1f}
+"""
+        
+        await self.send_message(message)
     
-    async def send_update(self, message):
-        """Send update"""
-        return await self.send(message)
+    async def send_market_status(self, status_text):
+        """Send market status update"""
+        message = f"""
+📊 <b>MARKET STATUS UPDATE</b>
+
+{status_text}
+
+⏰ {get_ist_time().strftime('%H:%M:%S IST')}
+"""
+        await self.send_message(message)
     
-    def is_enabled(self):
-        return self.enabled and self.bot is not None
+    async def send_daily_summary(self, summary_data):
+        """Send end of day summary"""
+        if not SEND_DAILY_SUMMARY:
+            return
+        
+        message = f"""
+📊 <b>DAILY SUMMARY</b>
+
+📅 Date: {get_ist_time().strftime('%d %b %Y')}
+
+📈 <b>Trading Stats:</b>
+• Signals Generated: {summary_data.get('signals', 0)}
+• Trades Taken: {summary_data.get('trades', 0)}
+• Win Rate: {summary_data.get('win_rate', 0):.1f}%
+
+💰 <b>Performance:</b>
+• Profit/Loss: ₹{summary_data.get('pnl', 0):+,.2f}
+• Best Trade: ₹{summary_data.get('best_trade', 0):+,.2f}
+• Worst Trade: ₹{summary_data.get('worst_trade', 0):+,.2f}
+
+🎯 <b>Accuracy:</b>
+• Wins: {summary_data.get('wins', 0)}
+• Losses: {summary_data.get('losses', 0)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Market Closed. See you tomorrow! 👋
+"""
+        await self.send_message(message)
+    
+    async def send_error_alert(self, error_text):
+        """Send error notification"""
+        message = f"""
+⚠️ <b>ERROR ALERT</b>
+
+{error_text}
+
+⏰ {get_ist_time().strftime('%H:%M:%S IST')}
+"""
+        await self.send_message(message)
 
 
-# ==================== Message Formatter ====================
 class MessageFormatter:
-    """Format Telegram messages"""
+    """Format messages for different scenarios"""
     
     @staticmethod
-    def format_entry_signal(signal):
-        """Format entry signal alert with enhanced info"""
-        emoji = "📈" if signal.signal_type.value == "CE_BUY" else "📉"
-        expiry = " ⚡ <b>EXPIRY DAY</b>" if signal.is_expiry_day else ""
-        
-        # OI strength emoji
-        oi_emoji = "🔥" if signal.oi_strength == 'strong' else "💪" if signal.oi_strength == 'medium' else "📊"
-        
-        msg = f"""
-{emoji} <b>{signal.signal_type.value} SIGNAL</b>{expiry}
-
-⏰ {signal.timestamp.strftime('%I:%M:%S %p')}
-💯 Confidence: <b>{signal.confidence}%</b>
-{oi_emoji} OI Strength: <b>{signal.oi_strength.upper()}</b>
-
-━━━━━━━━━━━━━━━━━━━━
-📊 <b>ENTRY DETAILS</b>
-━━━━━━━━━━━━━━━━━━━━
-
-Entry: ₹{signal.entry_price:.2f}
-Target: ₹{signal.target_price:.2f} (+{abs(signal.target_price - signal.entry_price):.0f} pts)
-Stop Loss: ₹{signal.stop_loss:.2f} (-{abs(signal.entry_price - signal.stop_loss):.0f} pts)
-
-R:R Ratio: <b>1:{signal.get_rr_ratio():.2f}</b>
-
-━━━━━━━━━━━━━━━━━━━━
-🎯 <b>OPTION INFO</b>
-━━━━━━━━━━━━━━━━━━━━
-
-ATM: {signal.atm_strike}
-Strike: {signal.recommended_strike}
-Premium: ₹{signal.option_premium:.2f}
-Premium SL: ₹{signal.premium_sl:.2f}
-
-━━━━━━━━━━━━━━━━━━━━
-📈 <b>ANALYSIS</b>
-━━━━━━━━━━━━━━━━━━━━
-
-VWAP: ₹{signal.vwap:.2f} ({signal.vwap_distance:+.0f} pts)
-VWAP Score: {signal.vwap_score}/100 {'✅' if signal.vwap_score >= 80 else '⚠️'}
-ATR: {signal.atr:.1f}
-PCR: {signal.pcr}
-
-OI Changes:
-  5m:  {signal.oi_5m:+.1f}%
-  15m: {signal.oi_15m:+.1f}%
-
-ATM {signal.atm_strike}:
-  CE: {signal.atm_ce_change:+.1f}%
-  PE: {signal.atm_pe_change:+.1f}%
-
-Volume: {signal.volume_ratio:.1f}x {'🔥' if signal.volume_spike else ''}
-Order Flow: {signal.order_flow:.2f}
-
-━━━━━━━━━━━━━━━━━━━━
-✅ Primary: {signal.primary_checks}/3
-🎁 Bonus: {signal.bonus_checks}/9
+    def format_oi_summary(analysis):
+        """Format OI analysis summary"""
+        return f"""
+📊 OI Analysis:
+CE: {analysis['oi']['ce_change']:+.1f}% ({analysis['oi']['ce_status']})
+PE: {analysis['oi']['pe_change']:+.1f}% ({analysis['oi']['pe_status']})
+→ {analysis['oi']['interpretation']}
 """
-        return msg
     
     @staticmethod
-    def format_exit_signal(position, reason, details):
-        """Format exit signal alert"""
-        signal = position.signal
-        profit = position.get_profit_loss()
-        profit_pct = position.get_profit_percent()
-        hold_time = position.get_hold_time_minutes()
-        
-        profit_emoji = "🟢" if profit > 0 else "🔴" if profit < 0 else "⚪"
-        
-        msg = f"""
-{signal.signal_type.value} EXIT
-
-⏰ Time: {position.exit_time.strftime('%I:%M:%S %p')}
-📝 Reason: <b>{reason}</b>
-{details}
-
-━━━━━━━━━━━━━━━━━━━━
-💰 <b>P&L SUMMARY</b>
-━━━━━━━━━━━━━━━━━━━━
-
-Entry: ₹{position.entry_premium:.2f}
-Exit: ₹{position.exit_premium:.2f}
-
-{profit_emoji} Profit: <b>₹{profit:+.2f} ({profit_pct:+.1f}%)</b>
-⏱️ Hold Time: {hold_time:.0f} minutes
-
-━━━━━━━━━━━━━━━━━━━━
-📊 <b>POSITION DETAILS</b>
-━━━━━━━━━━━━━━━━━━━━
-
-Strike: {signal.atm_strike}
-Entry Price: ₹{signal.entry_price:.2f}
-Target: ₹{signal.target_price:.2f}
-SL: ₹{signal.stop_loss:.2f}
+    def format_pcr_summary(analysis):
+        """Format PCR analysis summary"""
+        pcr = analysis['pcr']
+        return f"""
+🎯 PCR: {pcr['pcr']:.3f}
+Zone: {pcr['zone']}
+Bias: {pcr['bias']} ({pcr['strength']})
 """
-        return msg
     
     @staticmethod
-    def format_position_update(position, current_premium):
-        """Format position update"""
-        signal = position.signal
-        unrealized_pl = current_premium - position.entry_premium
-        unrealized_pct = (unrealized_pl / position.entry_premium * 100) if position.entry_premium > 0 else 0
-        
-        msg = f"""
-📊 <b>Position Update</b>
-
-Type: {signal.signal_type.value}
-Entry: ₹{position.entry_premium:.2f}
-Current: ₹{current_premium:.2f}
-Peak: ₹{position.highest_premium:.2f}
-Trail SL: ₹{position.trailing_sl:.2f}
-
-Unrealized P&L: ₹{unrealized_pl:+.2f} ({unrealized_pct:+.1f}%)
-Hold Time: {position.get_hold_time_minutes():.0f} min
+    def format_price_summary(analysis):
+        """Format price movement summary"""
+        return f"""
+💹 Price: ₹{analysis['price']:.2f}
+Change: {analysis['price_change']:+.1f} pts
 """
-        return msg
