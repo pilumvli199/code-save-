@@ -71,6 +71,16 @@ def get_nearest_expiry():
     expiry_date = today + timedelta(days=days_ahead)
     return expiry_date
 
+def get_futures_symbol():
+    """Auto-generate futures symbol based on nearest expiry"""
+    expiry = get_nearest_expiry()
+    month_code = expiry.strftime("%b").upper()[:3]  # JAN, FEB, MAR, etc.
+    year_code = expiry.strftime("%y")  # 24, 25, etc.
+    
+    # Format: NSE_FO|NIFTY25JANFUT
+    symbol = f"NSE_FO|NIFTY{year_code}{month_code}FUT"
+    return symbol
+
 def round_to_strike(price, interval=50):
     """Round price to nearest strike"""
     return round(price / interval) * interval
