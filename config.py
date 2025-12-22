@@ -44,7 +44,7 @@ IST = pytz.timezone('Asia/Kolkata')
 
 # Trading Hours
 MARKET_OPEN = time(9, 15)
-TRADING_START = time(9, 20)  # Start 5 min after open
+TRADING_START = time(9, 15)  # Start at market open
 TRADING_END = time(15, 20)    # Stop 10 min before close
 MARKET_CLOSE = time(15, 30)
 
