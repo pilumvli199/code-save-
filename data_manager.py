@@ -37,33 +37,48 @@ class DataManager:
     async def fetch_spot_price(self):
         """Fetch NIFTY 50 spot price"""
         try:
-            # Try INDEX symbol first
+            # URL encode the symbol (space becomes %20)
+            import urllib.parse
+            encoded_symbol = urllib.parse.quote(INDEX_SYMBOL)
+            
             url = f"{self.base_url}/market-quote/quotes"
-            params = {"symbol": INDEX_SYMBOL}
+            params = {"symbol": encoded_symbol}
             headers = {
                 "Authorization": f"Bearer {self.access_token}",
                 "Accept": "application/json"
             }
             
+            logger.debug(f"Fetching spot with symbol: {encoded_symbol}")
+            
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, headers=headers) as response:
+                    response_text = await response.text()
+                    logger.debug(f"Spot API Response: {response.status} - {response_text[:200]}")
+                    
                     if response.status == 200:
                         data = await response.json()
                         
                         # Try to get LTP from response
-                        if 'data' in data and INDEX_SYMBOL in data['data']:
-                            ltp = data['data'][INDEX_SYMBOL]['last_price']
-                            logger.debug(f"Spot price: ₹{ltp:.2f}")
+                        if 'data' in data:
+                            # Try both encoded and original symbol
+                            if encoded_symbol in data['data']:
+                                ltp = data['data'][encoded_symbol]['last_price']
+                            elif INDEX_SYMBOL in data['data']:
+                                ltp = data['data'][INDEX_SYMBOL]['last_price']
+                            else:
+                                logger.error(f"Symbol not found in data. Keys: {list(data['data'].keys())}")
+                                return None
+                            
+                            logger.info(f"  ✅ NIFTY Spot: ₹{ltp:.2f}")
                             return ltp
                         else:
-                            logger.error(f"Unexpected response format: {data}")
+                            logger.error(f"No 'data' in response: {data}")
                             return None
                     elif response.status == 401:
                         logger.error("❌ Upstox token expired! Refresh access token!")
                         return None
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Spot price fetch failed: {response.status} - {error_text}")
+                        logger.error(f"Spot price fetch failed: {response.status} - {response_text}")
                         return None
         except Exception as e:
             logger.error(f"Error fetching spot price: {e}")
