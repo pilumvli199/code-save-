@@ -90,6 +90,11 @@ SEND_STARTUP_MESSAGE = True
 SEND_DAILY_SUMMARY = False
 ALERT_ON_SIGNAL = True
 
+# ==================== LOGGING ====================
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_TO_FILE = False
+LOG_FILE_PATH = 'bot_logs.log'
+
 # ==================== BOT INFO ====================
 BOT_NAME = "NIFTY OI+PCR Bot"
 BOT_VERSION = "1.0-NIFTY-OI-PCR"
