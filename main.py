@@ -10,12 +10,14 @@ import logging
 from datetime import datetime
 
 from config import *
-from utils import *
+from utils import setup_logger, get_ist_time, is_trading_hours, get_market_status, SignalType
 from data_manager import DataManager
 from analyzers import MarketAnalyzer
 from signal_engine import SignalEngine
 from alerts import TelegramBot
 
+# Setup logging FIRST
+setup_logger()
 logger = logging.getLogger("NiftyBot.Main")
 
 
@@ -280,4 +282,14 @@ async def main():
         logger.info("👋 Bot stopped. Goodbye!")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Print startup message BEFORE asyncio (to catch import errors)
+    print("=" * 60)
+    print("🚀 NIFTY BOT STARTING...")
+    print("=" * 60)
+    
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"❌ FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
