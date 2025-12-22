@@ -178,23 +178,20 @@ class UpstoxClient:
             # Sort by expiry
             all_futures.sort(key=lambda x: x['expiry'])
             
-            # Get monthly contract (>10 days)
-            monthly = None
-            for fut in all_futures:
-                if fut['days_to_expiry'] > 10:
-                    monthly = fut
-                    break
+            # 🔧 FIX: Use NEAREST expiry (not monthly >10 days)
+            # Changed: Was looking for >10 days (monthly)
+            # Now: Uses nearest available expiry
+            nearest = all_futures[0] if all_futures else None
             
-            if not monthly:
-                # Fallback to nearest
-                monthly = all_futures[0]
-                logger.warning("⚠️ Using nearest expiry (no monthly found)")
+            if not nearest:
+                logger.error("❌ No futures contracts available")
+                return False
             
-            self.futures_key = monthly['key']
-            self.futures_symbol = monthly['symbol']
+            self.futures_key = nearest['key']
+            self.futures_symbol = nearest['symbol']
             
-            logger.info(f"✅ Futures: {monthly['symbol']}")
-            logger.info(f"   Expiry: {monthly['expiry'].strftime('%d %b %Y')} ({monthly['days_to_expiry']} days)")
+            logger.info(f"✅ Futures: {nearest['symbol']}")
+            logger.info(f"   Expiry: {nearest['expiry'].strftime('%d %b %Y')} ({nearest['days_to_expiry']} days)")
             
             return True
         
@@ -443,6 +440,32 @@ class DataManager:
             
             logger.info(f"✅ Parsed {len(strikes_data)} strikes | PCR: {pcr:.3f}")
             logger.info(f"   CE OI: {format_number(total_ce_oi)} | PE OI: {format_number(total_pe_oi)}")
+            
+            # 🆕 PER-STRIKE ANALYSIS
+            logger.info("")
+            logger.info("📊 PER-STRIKE BREAKDOWN:")
+            logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"{'Strike':>8} | {'CE OI':>12} | {'PE OI':>12} | {'CE Vol':>10} | {'PE Vol':>10} | {'CE LTP':>8} | {'PE LTP':>8}")
+            logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            
+            for strike in sorted(strikes_data.keys()):
+                data = strikes_data[strike]
+                
+                # Mark ATM strike
+                marker = " ATM" if strike == atm_strike else ""
+                
+                logger.info(
+                    f"{int(strike):>8}{marker:4} | "
+                    f"{format_number(data['ce_oi']):>12} | "
+                    f"{format_number(data['pe_oi']):>12} | "
+                    f"{format_number(data['ce_vol']):>10} | "
+                    f"{format_number(data['pe_vol']):>10} | "
+                    f"₹{data['ce_ltp']:>7.2f} | "
+                    f"₹{data['pe_ltp']:>7.2f}"
+                )
+            
+            logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info("")
             
             return {
                 'strikes': list(strikes_data.keys()),
