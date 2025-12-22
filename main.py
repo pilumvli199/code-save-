@@ -1,17 +1,14 @@
 """
-NIFTY 50 Trading Bot - Main Orchestrator
+NIFTY Bot - Main Orchestrator
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Strategy: Price + OI + PCR Combined
-Based on: 9 Scenarios PDF Guide
-Author: Yellow Flash
-Version: 1.0
+Strategy: OI + PCR + Price Combined
+Version: 1.0-NIFTY-OI-PCR
 """
 
 import asyncio
 import logging
 from datetime import datetime
 
-# Import modules
 from config import *
 from utils import *
 from data_manager import DataManager
@@ -19,11 +16,11 @@ from analyzers import MarketAnalyzer
 from signal_engine import SignalEngine
 from alerts import TelegramBot
 
-# Setup logger
-logger = setup_logger()
+logger = logging.getLogger("NiftyBot.Main")
+
 
 class NiftyTradingBot:
-    """Main trading bot orchestrator"""
+    """Main bot orchestrator"""
     
     def __init__(self):
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -59,22 +56,29 @@ class NiftyTradingBot:
         logger.info("✅ Configuration valid")
         
         # Initialize DataManager
-        success = await self.data_manager.initialize()
-        if not success:
-            logger.error("❌ DataManager initialization failed")
-            return False
+        try:
+            success = await self.data_manager.initialize()
+            if not success:
+                logger.error("❌ DataManager initialization failed")
+                logger.error("   Check: Upstox access token validity!")
+                logger.error("   Token expires daily - refresh it!")
+                return False
+            
+            logger.info("✅ DataManager initialized")
         
-        logger.info("✅ DataManager initialized")
+        except Exception as e:
+            logger.error(f"❌ DataManager init error: {e}")
+            return False
         
         # Test Telegram
         if SEND_TELEGRAM_ALERTS:
             try:
-                futures_sym = self.data_manager.futures_symbol if hasattr(self.data_manager, 'futures_symbol') else None
+                futures_sym = self.data_manager.futures_symbol
                 await self.telegram.send_startup_message(futures_sym)
                 logger.info("✅ Telegram connection OK")
             except Exception as e:
                 logger.error(f"❌ Telegram test failed: {e}")
-                return False
+                # Don't fail if Telegram fails
         
         # Check market status
         market_status = get_market_status()
@@ -97,7 +101,7 @@ class NiftyTradingBot:
         
         try:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # STEP 1: Fetch Market Data
+            # STEP 1: Fetch Data
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             
             logger.info("📥 Fetching market data...")
@@ -106,6 +110,10 @@ class NiftyTradingBot:
             spot_price = await self.data_manager.fetch_spot_price()
             if not spot_price:
                 logger.error("❌ Failed to fetch spot price")
+                logger.error("   Possible causes:")
+                logger.error("   1. Upstox token expired (refresh daily!)")
+                logger.error("   2. Market closed")
+                logger.error("   3. Network issue")
                 return
             
             logger.info(f"  ✅ NIFTY Spot: ₹{spot_price:.2f}")
@@ -113,7 +121,7 @@ class NiftyTradingBot:
             # Get futures price
             futures_price = await self.data_manager.fetch_futures_price()
             if not futures_price:
-                logger.warning("⚠️ Futures price unavailable, using spot")
+                logger.warning("⚠️ Futures unavailable, using spot")
                 futures_price = spot_price
             else:
                 logger.info(f"  ✅ NIFTY Futures: ₹{futures_price:.2f}")
@@ -134,10 +142,10 @@ class NiftyTradingBot:
             status = self.data_manager.get_status()
             
             if not status['has_data']:
-                logger.info(f"⏳ Building history: {status['history_count']}/{MIN_HISTORY_FOR_SIGNAL}")
+                logger.info(f"⏳ Building history: {status['oi_scans']}/{MIN_HISTORY_FOR_SIGNAL} scans")
                 return
             
-            logger.info(f"  ✅ History: {status['history_count']} data points")
+            logger.info(f"  ✅ History: {status['oi_scans']} OI scans, {status['price_scans']} price points")
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # STEP 3: Market Analysis
@@ -146,8 +154,8 @@ class NiftyTradingBot:
             logger.info("")
             logger.info("🔍 Running market analysis...")
             
-            # Calculate VWAP (simplified - you'd get from candles)
-            vwap = futures_price  # Placeholder
+            # Calculate VWAP (simplified)
+            vwap = futures_price
             
             # Run comprehensive analysis
             analysis = self.market_analyzer.comprehensive_analysis(
@@ -179,7 +187,8 @@ class NiftyTradingBot:
             
         except Exception as e:
             logger.error(f"❌ Error in scan_market: {e}")
-            await self.telegram.send_error_alert(f"Scan error: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     async def run(self):
         """Main bot loop"""
@@ -195,12 +204,12 @@ class NiftyTradingBot:
                 if not is_trading_hours():
                     if self.scan_count == 0:
                         logger.info("⏸️ Market not open yet. Waiting...")
-                    await asyncio.sleep(60)  # Check every minute
+                    await asyncio.sleep(60)
                     continue
                 
                 # Check if first scan of the day
                 now = get_ist_time()
-                if now.time() >= TRADING_START and self.scan_count == 0:
+                if now.time() >= SIGNAL_START and self.scan_count == 0:
                     logger.info("📈 Trading hours started!")
                     self.signal_engine.reset_daily_count()
                 
@@ -208,18 +217,13 @@ class NiftyTradingBot:
                 await self.scan_market()
                 
                 # Wait for next scan
-                await asyncio.sleep(SCAN_INTERVAL_SECONDS)
+                await asyncio.sleep(SCAN_INTERVAL)
                 
                 # Check if market closing
-                if now.time() >= TRADING_END:
+                if now.time() >= MARKET_CLOSE:
                     logger.info("📴 Trading hours ended")
-                    
-                    # Send daily summary (if implemented)
-                    # await self.telegram.send_daily_summary({})
-                    
-                    # Wait until next day
                     self.scan_count = 0
-                    await asyncio.sleep(3600)  # Sleep 1 hour
+                    await asyncio.sleep(3600)
             
             except KeyboardInterrupt:
                 logger.info("⚠️ Keyboard interrupt received")
@@ -234,6 +238,12 @@ class NiftyTradingBot:
         # Initialize
         if not await self.initialize():
             logger.error("❌ Initialization failed. Exiting.")
+            logger.error("")
+            logger.error("🔧 TROUBLESHOOTING:")
+            logger.error("1. Check Upstox access token (expires daily!)")
+            logger.error("2. Verify environment variables are set")
+            logger.error("3. Check network connectivity")
+            logger.error("4. Verify market is open")
             return
         
         try:
@@ -263,10 +273,11 @@ async def main():
         logger.info("⚠️ Keyboard interrupt")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         bot.stop()
         logger.info("👋 Bot stopped. Goodbye!")
 
 if __name__ == "__main__":
-    # Run the bot
     asyncio.run(main())
