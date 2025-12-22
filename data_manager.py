@@ -37,22 +37,38 @@ class DataManager:
     async def fetch_spot_price(self):
         """Fetch NIFTY 50 spot price"""
         try:
+            # Try INDEX symbol first
             url = f"{self.base_url}/market-quote/quotes"
             params = {"symbol": INDEX_SYMBOL}
-            headers = {"Authorization": f"Bearer {self.access_token}"}
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json"
+            }
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
-                        ltp = data['data'][INDEX_SYMBOL]['last_price']
-                        logger.debug(f"Spot price: ₹{ltp:.2f}")
-                        return ltp
+                        
+                        # Try to get LTP from response
+                        if 'data' in data and INDEX_SYMBOL in data['data']:
+                            ltp = data['data'][INDEX_SYMBOL]['last_price']
+                            logger.debug(f"Spot price: ₹{ltp:.2f}")
+                            return ltp
+                        else:
+                            logger.error(f"Unexpected response format: {data}")
+                            return None
+                    elif response.status == 401:
+                        logger.error("❌ Upstox token expired! Refresh access token!")
+                        return None
                     else:
-                        logger.error(f"Spot price fetch failed: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Spot price fetch failed: {response.status} - {error_text}")
                         return None
         except Exception as e:
             logger.error(f"Error fetching spot price: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     async def fetch_futures_price(self):
@@ -60,20 +76,34 @@ class DataManager:
         try:
             url = f"{self.base_url}/market-quote/quotes"
             params = {"symbol": self.futures_symbol}
-            headers = {"Authorization": f"Bearer {self.access_token}"}
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json"
+            }
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
-                        ltp = data['data'][self.futures_symbol]['last_price']
-                        logger.debug(f"Futures price: ₹{ltp:.2f}")
-                        return ltp
+                        
+                        if 'data' in data and self.futures_symbol in data['data']:
+                            ltp = data['data'][self.futures_symbol]['last_price']
+                            logger.debug(f"Futures price: ₹{ltp:.2f}")
+                            return ltp
+                        else:
+                            logger.error(f"Futures data not found in response")
+                            return None
+                    elif response.status == 401:
+                        logger.error("❌ Upstox token expired!")
+                        return None
                     else:
-                        logger.error(f"Futures price fetch failed: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Futures fetch failed: {response.status} - {error_text}")
                         return None
         except Exception as e:
             logger.error(f"Error fetching futures price: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     async def fetch_option_chain(self, spot_price):
