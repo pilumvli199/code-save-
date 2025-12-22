@@ -31,7 +31,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Instrument
 SYMBOL = "NIFTY"
-INDEX_SYMBOL = "NSE_INDEX|Nifty 50"
+INDEX_SYMBOL = "NSE_INDEX|Nifty50"  # Correct Upstox v2 format (no space!)
 
 # Futures Symbol - Can be set via ENV or auto-calculated
 FUTURES_SYMBOL = os.getenv("FUTURES_SYMBOL", None)  # If not set, will auto-detect in code
