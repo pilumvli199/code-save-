@@ -81,12 +81,44 @@ class UpstoxClient:
         """Auto-detect NIFTY instruments"""
         logger.info("🔍 Auto-detecting NIFTY instruments...")
         
+        # 🔧 DEBUG: Check if token is loaded
+        if not UPSTOX_ACCESS_TOKEN:
+            logger.error("❌ UPSTOX_ACCESS_TOKEN is empty!")
+            logger.error("   Check Railway environment variables!")
+            return False
+        
+        token_preview = UPSTOX_ACCESS_TOKEN[:10] + "..." if len(UPSTOX_ACCESS_TOKEN) > 10 else "TOO_SHORT"
+        logger.info(f"🔑 Token loaded: {token_preview} (length: {len(UPSTOX_ACCESS_TOKEN)})")
+        
         try:
             url = "https://api.upstox.com/v2/market-quote/instruments"
             
-            async with self.session.get(url) as resp:
+            headers = {
+                'Authorization': f'Bearer {UPSTOX_ACCESS_TOKEN}',
+                'Accept': 'application/json'
+            }
+            
+            logger.info(f"📡 Fetching instruments from: {url}")
+            
+            async with self.session.get(url, headers=headers) as resp:
+                logger.info(f"📊 Response status: {resp.status}")
+                
+                if resp.status == 401:
+                    response_text = await resp.text()
+                    logger.error(f"❌ 401 Unauthorized Response:")
+                    logger.error(f"   {response_text[:500]}")
+                    logger.error(f"")
+                    logger.error(f"🔧 POSSIBLE CAUSES:")
+                    logger.error(f"   1. Token expired (refresh from Upstox)")
+                    logger.error(f"   2. Token has whitespace/newlines")
+                    logger.error(f"   3. Token copied incorrectly")
+                    logger.error(f"   4. Wrong token type (need ACCESS token, not API key)")
+                    return False
+                
                 if resp.status != 200:
+                    response_text = await resp.text()
                     logger.error(f"❌ Instruments fetch failed: {resp.status}")
+                    logger.error(f"   Response: {response_text[:500]}")
                     return False
                 
                 import gzip
@@ -166,6 +198,8 @@ class UpstoxClient:
         
         except Exception as e:
             logger.error(f"❌ Detection failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     async def get_quote(self, instrument_key):
