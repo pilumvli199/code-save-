@@ -25,8 +25,15 @@ class UpstoxClient:
     def __init__(self):
         self.session = None
         self.spot_key = None
+        
+        # Futures (MONTHLY - Current month last Thursday)
         self.futures_key = None
         self.futures_symbol = None
+        self.futures_expiry = None
+        
+        # Options (WEEKLY - Next Tuesday)
+        self.weekly_expiry = None
+        self.weekly_expiry_str = None
     
     async def initialize(self):
         """Initialize and detect instruments"""
@@ -178,20 +185,43 @@ class UpstoxClient:
             # Sort by expiry
             all_futures.sort(key=lambda x: x['expiry'])
             
-            # 🔧 FIX: Use NEAREST expiry (not monthly >10 days)
-            # Changed: Was looking for >10 days (monthly)
-            # Now: Uses nearest available expiry
-            nearest = all_futures[0] if all_futures else None
+            # 🔧 FIX: Find CURRENT MONTH futures (nearest Thursday expiry)
+            # NIFTY Futures expire on last Thursday of month
+            now = datetime.now(IST)
+            current_month_futures = None
             
-            if not nearest:
-                logger.error("❌ No futures contracts available")
-                return False
+            for fut in all_futures:
+                # Check if same month and weekday is Thursday (3)
+                if (fut['expiry'].month == now.month and 
+                    fut['expiry'].year == now.year and
+                    fut['expiry'].weekday() == 3):  # Thursday
+                    current_month_futures = fut
+                    break
             
-            self.futures_key = nearest['key']
-            self.futures_symbol = nearest['symbol']
+            # If current month not found, use nearest
+            if not current_month_futures:
+                current_month_futures = all_futures[0]
+                logger.warning(f"⚠️ Current month futures not found, using nearest")
             
-            logger.info(f"✅ Futures: {nearest['symbol']}")
-            logger.info(f"   Expiry: {nearest['expiry'].strftime('%d %b %Y')} ({nearest['days_to_expiry']} days)")
+            self.futures_key = current_month_futures['key']
+            self.futures_symbol = current_month_futures['symbol']
+            self.futures_expiry = current_month_futures['expiry']
+            
+            logger.info(f"✅ Futures (MONTHLY): {current_month_futures['symbol']}")
+            logger.info(f"   Expiry: {current_month_futures['expiry'].strftime('%d %b %Y %A')} ({current_month_futures['days_to_expiry']} days)")
+            
+            # 🔧 FIX: Calculate WEEKLY expiry (Next Tuesday)
+            # NIFTY Options expire every Tuesday
+            days_to_tuesday = (1 - now.weekday()) % 7  # Tuesday = 1
+            if days_to_tuesday == 0:
+                days_to_tuesday = 7  # If today is Tuesday, get next Tuesday
+            
+            next_tuesday = now + timedelta(days=days_to_tuesday)
+            self.weekly_expiry = next_tuesday
+            self.weekly_expiry_str = next_tuesday.strftime('%Y-%m-%d')
+            
+            logger.info(f"✅ Options (WEEKLY): Next Tuesday")
+            logger.info(f"   Expiry: {next_tuesday.strftime('%d %b %Y %A')} ({days_to_tuesday} days)")
             
             return True
         
@@ -329,9 +359,8 @@ class DataManager:
         Returns: dict with option data + totals
         """
         try:
-            # Get nearest expiry (Tuesday)
-            expiry = get_nearest_expiry()
-            expiry_str = expiry.strftime('%Y-%m-%d')
+            # Get WEEKLY expiry (Tuesday) for options
+            expiry_str = self.client.weekly_expiry_str
             
             # Calculate ATM
             atm_strike = round_to_strike(spot_price)
@@ -516,6 +545,25 @@ class DataManager:
                         best_match['total_pe_oi']) * 100
         
         return ce_change, pe_change
+    
+    def get_oi_history(self, minutes_ago=5):
+        """Get OI snapshot from N minutes ago"""
+        if len(self.oi_history) < 2:
+            return None
+        
+        target_time = get_ist_time() - timedelta(minutes=minutes_ago)
+        
+        # Find closest snapshot
+        best_match = None
+        min_diff = 999
+        
+        for snapshot in self.oi_history:
+            diff = abs((snapshot['time'] - target_time).total_seconds() / 60)
+            if diff < min_diff and diff <= 5:
+                min_diff = diff
+                best_match = snapshot
+        
+        return best_match
     
     def get_price_change(self, minutes_ago=5):
         """Get price change from N minutes ago"""
