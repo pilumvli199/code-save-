@@ -58,6 +58,14 @@ class NiftyTradingBot:
         
         logger.info("✅ Configuration valid")
         
+        # Initialize DataManager
+        success = await self.data_manager.initialize()
+        if not success:
+            logger.error("❌ DataManager initialization failed")
+            return False
+        
+        logger.info("✅ DataManager initialized")
+        
         # Test Telegram
         if SEND_TELEGRAM_ALERTS:
             try:
@@ -228,8 +236,12 @@ class NiftyTradingBot:
             logger.error("❌ Initialization failed. Exiting.")
             return
         
-        # Run main loop
-        await self.run()
+        try:
+            # Run main loop
+            await self.run()
+        finally:
+            # Cleanup
+            await self.data_manager.close()
     
     def stop(self):
         """Stop the bot"""
