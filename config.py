@@ -14,7 +14,7 @@ UPSTOX_BASE_URL = 'https://api.upstox.com'
 UPSTOX_QUOTE_URL = f'{UPSTOX_BASE_URL}/v2/market-quote/quotes'
 UPSTOX_HISTORICAL_URL = f'{UPSTOX_BASE_URL}/v2/historical-candle'
 UPSTOX_OPTION_CHAIN_URL = f'{UPSTOX_BASE_URL}/v2/option/chain'
-UPSTOX_INSTRUMENTS_URL = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz'
+UPSTOX_INSTRUMENTS_URL = 'https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz'
 
 # Clean token (remove whitespace/newlines)
 UPSTOX_ACCESS_TOKEN = os.getenv('UPSTOX_ACCESS_TOKEN', '').strip()
@@ -26,6 +26,7 @@ IST = pytz.timezone('Asia/Kolkata')
 REDIS_URL = os.getenv('REDIS_URL', None)
 MEMORY_TTL_HOURS = 24
 SCAN_INTERVAL = 300  # 5 minutes
+SCAN_INTERVAL_SECONDS = 300  # Same as SCAN_INTERVAL
 
 # OI Memory: 35 scans = 30+ minutes
 OI_MEMORY_SCANS = 35
@@ -33,6 +34,8 @@ OI_MEMORY_BUFFER = 5
 
 # ==================== MARKET TIMINGS ====================
 MARKET_OPEN = time(9, 15)
+TRADING_START = time(9, 15)
+TRADING_END = time(15, 20)
 SIGNAL_START = time(9, 15)
 MARKET_CLOSE = time(15, 30)
 
