@@ -91,33 +91,20 @@ class UpstoxClient:
         logger.info(f"🔑 Token loaded: {token_preview} (length: {len(UPSTOX_ACCESS_TOKEN)})")
         
         try:
-            url = "https://api.upstox.com/v2/market-quote/instruments"
+            # 🔧 FIX: Use correct instruments download endpoint
+            # OLD (404): https://api.upstox.com/v2/market-quote/instruments
+            # NEW (✅): https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz
+            url = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
             
-            headers = {
-                'Authorization': f'Bearer {UPSTOX_ACCESS_TOKEN}',
-                'Accept': 'application/json'
-            }
+            logger.info(f"📡 Downloading instruments from Upstox CDN...")
             
-            logger.info(f"📡 Fetching instruments from: {url}")
-            
-            async with self.session.get(url, headers=headers) as resp:
+            # No auth needed for CDN download
+            async with self.session.get(url) as resp:
                 logger.info(f"📊 Response status: {resp.status}")
-                
-                if resp.status == 401:
-                    response_text = await resp.text()
-                    logger.error(f"❌ 401 Unauthorized Response:")
-                    logger.error(f"   {response_text[:500]}")
-                    logger.error(f"")
-                    logger.error(f"🔧 POSSIBLE CAUSES:")
-                    logger.error(f"   1. Token expired (refresh from Upstox)")
-                    logger.error(f"   2. Token has whitespace/newlines")
-                    logger.error(f"   3. Token copied incorrectly")
-                    logger.error(f"   4. Wrong token type (need ACCESS token, not API key)")
-                    return False
                 
                 if resp.status != 200:
                     response_text = await resp.text()
-                    logger.error(f"❌ Instruments fetch failed: {resp.status}")
+                    logger.error(f"❌ Instruments download failed: {resp.status}")
                     logger.error(f"   Response: {response_text[:500]}")
                     return False
                 
@@ -126,21 +113,26 @@ class UpstoxClient:
                 json_text = gzip.decompress(content).decode('utf-8')
                 instruments = json.loads(json_text)
             
+            logger.info(f"✅ Downloaded {len(instruments)} instruments")
+            
             # Find NIFTY spot
             for instrument in instruments:
-                if instrument.get('segment') != 'NSE_INDEX':
+                segment = instrument.get('segment')
+                if segment != 'NSE_INDEX':
                     continue
                 
                 name = instrument.get('name', '').upper()
                 symbol = instrument.get('trading_symbol', '').upper()
                 
-                if 'NIFTY' in name or 'NIFTY' in symbol:
+                # Match NIFTY 50
+                if name == 'NIFTY 50' or symbol == 'NIFTY 50':
                     self.spot_key = instrument.get('instrument_key')
-                    logger.info(f"✅ Spot: {self.spot_key}")
+                    logger.info(f"✅ Spot found: {self.spot_key}")
                     break
             
             if not self.spot_key:
-                logger.error("❌ NIFTY spot not found")
+                logger.error("❌ NIFTY 50 not found in instruments")
+                logger.error("   Searched for: name='NIFTY 50' or symbol='NIFTY 50'")
                 return False
             
             # Find MONTHLY futures
@@ -148,19 +140,25 @@ class UpstoxClient:
             all_futures = []
             
             for instrument in instruments:
-                if instrument.get('segment') != 'NSE_FO':
+                segment = instrument.get('segment')
+                if segment != 'NSE_FO':
                     continue
-                if instrument.get('instrument_type') != 'FUT':
+                    
+                inst_type = instrument.get('instrument_type')
+                if inst_type != 'FUT':
                     continue
-                if instrument.get('name') != 'NIFTY':
+                    
+                name = instrument.get('name', '')
+                if name != 'NIFTY':
                     continue
                 
-                expiry_ms = instrument.get('expiry', 0)
-                if not expiry_ms:
+                expiry = instrument.get('expiry')
+                if not expiry:
                     continue
                 
                 try:
-                    expiry_dt = datetime.fromtimestamp(expiry_ms / 1000, tz=IST)
+                    # Expiry is in milliseconds
+                    expiry_dt = datetime.fromtimestamp(expiry / 1000, tz=IST)
                     
                     if expiry_dt > now:
                         days_to_expiry = (expiry_dt - now).days
@@ -170,16 +168,17 @@ class UpstoxClient:
                             'symbol': instrument.get('trading_symbol', ''),
                             'days_to_expiry': days_to_expiry
                         })
-                except:
+                except Exception as e:
                     continue
             
             if not all_futures:
-                logger.error("❌ No futures found")
+                logger.error("❌ No NIFTY futures found")
                 return False
             
+            # Sort by expiry
             all_futures.sort(key=lambda x: x['expiry'])
             
-            # Get monthly (>10 days to expiry)
+            # Get monthly contract (>10 days)
             monthly = None
             for fut in all_futures:
                 if fut['days_to_expiry'] > 10:
@@ -187,12 +186,15 @@ class UpstoxClient:
                     break
             
             if not monthly:
+                # Fallback to nearest
                 monthly = all_futures[0]
+                logger.warning("⚠️ Using nearest expiry (no monthly found)")
             
             self.futures_key = monthly['key']
             self.futures_symbol = monthly['symbol']
             
-            logger.info(f"✅ Futures: {monthly['symbol']} ({monthly['days_to_expiry']} days)")
+            logger.info(f"✅ Futures: {monthly['symbol']}")
+            logger.info(f"   Expiry: {monthly['expiry'].strftime('%d %b %Y')} ({monthly['days_to_expiry']} days)")
             
             return True
         
